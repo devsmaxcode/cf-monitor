@@ -1,0 +1,14 @@
+/
+/quran
+/quran/al-fatihah
+/quran/al-baqarah
+/quran/juz/1
+/quran/page/1
+/hadith/books
+/dua
+/dua/categories
+/dua/all-duas
+/ruqyah
+/99-names-of-allah
+/zakat-calculator
+/tahakiks
