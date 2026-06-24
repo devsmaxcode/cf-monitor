@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "portless run bun run  src/server.ts",
+    "start": "bun run src/server.ts",
+    "dev": "portless run bun run src/server.ts",
     "monitor": "bun run scripts/cloudflare_cache_monitor_bun.ts"
   },
   "devDependencies": {

@@ -1,3 +1,5 @@
+import { checkbox, emptyTableRow, escapeAttr, escapeHtml, filterOptions, icon, statCard } from "./components";
+
 type Config = {
   baseUrl: string;
   pages: string[];
@@ -28,6 +30,22 @@ type UsedProxyRow = {
   timestamp: string;
 };
 
+type MetricTimeColumn = {
+  key: string;
+  label: string;
+  meta: string;
+  sort: number;
+};
+
+type MetricTimeGroup = {
+  key: string;
+  page: string;
+  url: string;
+  country: string;
+  countryLabel: string;
+  cells: Map<string, MetricRow>;
+};
+
 type MetricsPayload = {
   latestRows: MetricRow[];
   pageStats: {
@@ -49,8 +67,13 @@ type MetricsPayload = {
     avgResponseMs: number;
     lastTimestamp: string | null;
   };
+  timeColumns: MetricTimeColumn[];
   rows: MetricRow[];
 };
+
+const MATRIX_URL_COL_WIDTH = 300;
+const MATRIX_COUNTRY_COL_WIDTH = 130;
+const MATRIX_TIME_COL_WIDTH = 156;
 
 type Status = {
   running: boolean;
@@ -70,24 +93,6 @@ type RuntimeMessage = {
   metrics: MetricsPayload;
   status: Status;
 };
-
-type IconName =
-  | "bars"
-  | "calendar"
-  | "chevronLeft"
-  | "chevronRight"
-  | "clock"
-  | "cloud"
-  | "gauge"
-  | "grid"
-  | "link"
-  | "pulse"
-  | "refresh"
-  | "save"
-  | "settings"
-  | "shuffle"
-  | "timer"
-  | "user";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
@@ -197,6 +202,20 @@ function applyRuntime(nextMetrics: MetricsPayload, nextStatus: Status) {
   updateRuntimeView();
 }
 
+function topAgeRows() {
+  return [...metrics.pageStats].sort((a, b) => b.maxAge - a.maxAge).slice(0, 12);
+}
+
+function setText(selector: string, value: string) {
+  const el = app.querySelector<HTMLElement>(selector);
+  if (el) el.textContent = value;
+}
+
+function setHtml(selector: string, value: string) {
+  const el = app.querySelector<HTMLElement>(selector);
+  if (el) el.innerHTML = value;
+}
+
 function render() {
   app.innerHTML = `
     <header class="appbar">
@@ -234,15 +253,18 @@ function render() {
 }
 
 function renderMetrics() {
-  const rows = filteredMetricRows();
-  const pagination = paginationInfo(rows.length);
-  const pageRows = rows.slice(pagination.start, pagination.end);
+  const samples = sampleMetricRows();
+  const rows = filteredMetricRows(samples);
+  const timeColumns = metricTimeColumns(rows);
+  const groups = metricTimeGroups(rows, timeColumns);
+  const pagination = paginationInfo(groups.length);
+  const pageGroups = groups.slice(pagination.start, pagination.end);
 
   return `
     <section class="samples-panel">
       <div class="section-head">
         <h2><span class="section-icon" aria-hidden="true">${icon("grid")}</span>Cache Samples</h2>
-        <span data-filter-count>${rows.length} of ${metrics.latestRows.length} latest</span>
+        <span data-filter-count>${rows.length} of ${samples.length} fetched</span>
       </div>
       <div class="table-filters">
         <label>
@@ -253,40 +275,32 @@ function renderMetrics() {
           Page
           <select data-filter="page">
             <option value="">All pages</option>
-            ${filterOptions(uniqueValues(metrics.latestRows.map((row) => row.page)), metricFilters.page)}
+            ${filterOptions(uniqueValues(samples.map((row) => row.page)), metricFilters.page)}
           </select>
         </label>
         <label>
           Country
           <select data-filter="country">
             <option value="">All countries</option>
-            ${filterOptions(uniqueValues(metrics.latestRows.map((row) => row.proxy_country)), metricFilters.country, countryName)}
+            ${filterOptions(uniqueValues(samples.map((row) => row.proxy_country)), metricFilters.country, countryName)}
           </select>
         </label>
         <label>
           Status
           <select data-filter="status">
             <option value="">All statuses</option>
-            ${filterOptions(uniqueValues(metrics.latestRows.map(cacheStatus)), metricFilters.status)}
+            ${filterOptions(uniqueValues(samples.map(cacheStatus)), metricFilters.status)}
           </select>
         </label>
       </div>
       <div class="table-scroll">
-        <table class="sample-table">
-          <thead>
-            <tr>
-              <th>URL</th>
-              <th>Country</th>
-              <th>Status</th>
-              <th>Age</th>
-              <th>Edge</th>
-              <th>Response</th>
-              <th>HTTP</th>
-              <th>Checked</th>
-            </tr>
+        <table class="sample-table metric-matrix" data-metric-table style="${metricMatrixStyle(timeColumns)}">
+          ${renderMetricColgroup(timeColumns)}
+          <thead data-filter-head>
+            ${renderMetricTimeHeader(timeColumns)}
           </thead>
           <tbody data-filter-body>
-            ${rows.length ? pageRows.map(renderMetricListRow).join("") : renderEmptyListRow()}
+            ${groups.length ? pageGroups.map((group) => renderMetricMatrixRow(group, timeColumns)).join("") : renderEmptyListRow(timeColumns)}
           </tbody>
         </table>
       </div>
@@ -302,11 +316,7 @@ function renderMetrics() {
           <span data-age-timestamp>${metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : ""}</span>
         </div>
         <div class="age-list" data-age-list>
-          ${metrics.pageStats
-            .sort((a, b) => b.maxAge - a.maxAge)
-            .slice(0, 12)
-            .map(renderAgeRow)
-            .join("")}
+          ${topAgeRows().map(renderAgeRow).join("")}
         </div>
       </aside>
 
@@ -322,7 +332,6 @@ function renderMetrics() {
 }
 
 function updateRuntimeView() {
-  const statusLabel = runtimeStatusLabel();
   const statusDot = app.querySelector<HTMLElement>("[data-status-dot]");
   const statusText = app.querySelector<HTMLElement>("[data-status-label]");
   const actions = app.querySelector<HTMLElement>("[data-actions]");
@@ -335,39 +344,25 @@ function updateRuntimeView() {
   }
 
   statusDot.classList.toggle("on", statusState.busy || statusState.running);
-  statusText.textContent = statusLabel;
+  statusText.textContent = runtimeStatusLabel();
   actions.innerHTML = renderActionButtons();
   wireActionEvents();
   statusStrip.innerHTML = renderStatusCards();
 
   if (activeTab === "proxies" && !formDirty) {
     const used = usedProxyRows();
-    const usedCount = app.querySelector<HTMLElement>("[data-used-proxy-count]");
-    const usedList = app.querySelector<HTMLElement>("[data-used-proxies]");
-    if (usedCount) usedCount.textContent = `${used.length} recent`;
-    if (usedList) usedList.innerHTML = renderUsedProxyList(used);
+    setText("[data-used-proxy-count]", `${used.length} recent`);
+    setHtml("[data-used-proxies]", renderUsedProxyList(used));
     return;
   }
 
   if (activeTab !== "metrics") return;
 
   updateMetricList();
-
-  const ageTimestamp = app.querySelector<HTMLElement>("[data-age-timestamp]");
-  const ageList = app.querySelector<HTMLElement>("[data-age-list]");
-  const logRound = app.querySelector<HTMLElement>("[data-log-round]");
-  const logOutput = app.querySelector<HTMLElement>("[data-log-output]");
-
-  if (ageTimestamp) ageTimestamp.textContent = metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "";
-  if (ageList) {
-    ageList.innerHTML = metrics.pageStats
-      .sort((a, b) => b.maxAge - a.maxAge)
-      .slice(0, 12)
-      .map(renderAgeRow)
-      .join("");
-  }
-  if (logRound) logRound.textContent = `round ${statusState.round}`;
-  if (logOutput) logOutput.textContent = statusState.logs.slice(-28).join("\n") || "No collector output yet.";
+  setText("[data-age-timestamp]", metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "");
+  setHtml("[data-age-list]", topAgeRows().map(renderAgeRow).join(""));
+  setText("[data-log-round]", `round ${statusState.round}`);
+  setText("[data-log-output]", statusState.logs.slice(-28).join("\n") || "No collector output yet.");
 }
 
 function runtimeStatusLabel() {
@@ -379,7 +374,7 @@ function renderActionButtons() {
     <button class="icon-button" data-action="refresh" title="Refresh" aria-label="Refresh">${icon("refresh")}</button>
     <button class="button secondary" data-action="run-once" ${statusState.busy ? "disabled" : ""}>Run Now</button>
     ${
-      statusState.running
+      statusState.running || statusState.busy
         ? '<button class="button danger" data-action="stop">Stop</button>'
         : '<button class="button primary" data-action="start">Start</button>'
     }
@@ -407,9 +402,13 @@ function renderStatusCards() {
   `;
 }
 
-function filteredMetricRows() {
+function sampleMetricRows() {
+  return [...metrics.rows].reverse();
+}
+
+function filteredMetricRows(samples = sampleMetricRows()) {
   const query = metricFilters.query.trim().toLowerCase();
-  return metrics.latestRows.filter((row) => {
+  return samples.filter((row) => {
     if (metricFilters.country && row.proxy_country !== metricFilters.country) return false;
     if (metricFilters.page && row.page !== metricFilters.page) return false;
     if (metricFilters.status && cacheStatus(row) !== metricFilters.status) return false;
@@ -420,39 +419,218 @@ function filteredMetricRows() {
   });
 }
 
-function renderMetricListRow(row: MetricRow) {
-  const status = cacheStatus(row);
-  const tone = row.error ? "fail" : status === "HIT" ? "hit" : isMissLike(status) ? "miss" : "other";
-  const response = row.response_ms ? `${row.response_ms} ms` : "-";
-  const age = Number(row.age_seconds) || 0;
-  const title = row.error || row.cf_ray || row.proxy || "";
+function metricTimeColumns(rows: MetricRow[]) {
+  const columns = new Map<string, MetricTimeColumn & { start: number; end: number }>();
 
+  for (const row of rows) {
+    const column = metricBatchColumn(row);
+    const time = Date.parse(row.timestamp_utc || "");
+    const point = Number.isNaN(time) ? column.sort : time;
+    const existing = columns.get(column.key);
+
+    if (!existing) {
+      columns.set(column.key, { ...column, start: point, end: point });
+      continue;
+    }
+
+    existing.start = Math.min(existing.start, point);
+    existing.end = Math.max(existing.end, point);
+    existing.sort = existing.start;
+    existing.meta = batchTimeRange(existing.start, existing.end);
+  }
+
+  return [...columns.values()]
+    .sort((a, b) => a.sort - b.sort)
+    .map(({ start, end, ...column }) => column);
+}
+
+function metricTimeGroups(rows: MetricRow[], columns: MetricTimeColumn[]) {
+  const validColumns = new Set(columns.map((column) => column.key));
+  const groups = new Map<string, MetricTimeGroup>();
+
+  for (const row of rows) {
+    const country = row.proxy_country || "-";
+    const key = [row.page || "-", row.url || "-", country].join("|");
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        page: row.page || "-",
+        url: row.url || "-",
+        country,
+        countryLabel: countryName(country),
+        cells: new Map<string, MetricRow>(),
+      };
+      groups.set(key, group);
+    }
+
+    const columnKey = metricBatchColumn(row).key;
+    if (validColumns.has(columnKey) && !group.cells.has(columnKey)) {
+      group.cells.set(columnKey, row);
+    }
+  }
+
+  return [...groups.values()];
+}
+
+function metricTimeColumn(value: string): MetricTimeColumn {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return { key: "unknown", label: "-", meta: "No time", sort: Number.MAX_SAFE_INTEGER };
+  }
+
+  const key = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+  ].join("-");
+
+  return {
+    key,
+    label: date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    meta: date.toLocaleDateString([], { month: "short", day: "numeric" }),
+    sort:
+      date.getFullYear() * 100000000 +
+      (date.getMonth() + 1) * 1000000 +
+      date.getDate() * 10000 +
+      date.getHours() * 100 +
+      date.getMinutes(),
+  };
+}
+
+function metricBatchColumn(row: MetricRow): MetricTimeColumn {
+  const column = metricTimeColumn(row.timestamp_utc || "");
+  if (!row.round) return column;
+  const recheck = row.round.endsWith("-recheck");
+  const round = recheck ? row.round.replace(/-recheck$/, "") : row.round;
+  return { ...column, key: `batch-${row.round}`, label: recheck ? `Recheck ${round}` : `First ${round}` };
+}
+
+function batchTimeRange(start: number, end: number) {
+  if (start === Number.MAX_SAFE_INTEGER) return "No time";
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  const startLabel = startDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const endLabel = endDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `${startLabel} - ${endLabel} ${startDate.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
+
+function renderMetricTimeHeader(columns: MetricTimeColumn[]) {
   return `
-    <tr title="${escapeAttr(title)}">
-      <th class="url-cell">
-        <strong>${escapeHtml(row.page || "-")}</strong>
-        <span>${escapeHtml(row.url || "-")}</span>
-      </th>
-      <td>
-        <strong>${escapeHtml(row.proxy_country || "-")}</strong>
-        <span>${escapeHtml(countryName(row.proxy_country || "-"))}</span>
-      </td>
-      <td><strong class="status-pill ${tone}">${escapeHtml(status)}</strong></td>
-      <td>${duration(age)}</td>
-      <td>${escapeHtml(row.cf_edge || "-")}</td>
-      <td>${escapeHtml(response)}</td>
-      <td>${escapeHtml(row.status_code || "-")}</td>
-      <td>${row.timestamp_utc ? shortDate(row.timestamp_utc) : "-"}</td>
+    <tr>
+      <th>URL</th>
+      <th>Country</th>
+      ${columns.map((column) => `
+        <th class="metric-time-heading ${column.key.endsWith("-recheck") ? "recheck-heading" : ""}" title="${escapeAttr(`${column.meta}, ${column.label}`)}">
+          <strong>${escapeHtml(column.label)}</strong>
+          <span>${escapeHtml(column.meta)}</span>
+        </th>
+      `).join("")}
     </tr>
   `;
 }
 
-function renderEmptyListRow() {
+function renderMetricColgroup(columns: MetricTimeColumn[]) {
+  return `<colgroup data-filter-cols>${renderMetricCols(columns)}</colgroup>`;
+}
+
+function renderMetricCols(columns: MetricTimeColumn[]) {
+  return `
+    <col class="matrix-url-col" />
+    <col class="matrix-country-col" />
+    ${columns.map(() => '<col class="matrix-time-col" />').join("")}
+  `;
+}
+
+function metricMatrixMinWidth(columns: MetricTimeColumn[]) {
+  return MATRIX_URL_COL_WIDTH + MATRIX_COUNTRY_COL_WIDTH + columns.length * MATRIX_TIME_COL_WIDTH;
+}
+
+function metricMatrixStyle(columns: MetricTimeColumn[]) {
+  return [
+    `--matrix-url-width:${MATRIX_URL_COL_WIDTH}px`,
+    `--matrix-country-width:${MATRIX_COUNTRY_COL_WIDTH}px`,
+    `--matrix-time-width:${MATRIX_TIME_COL_WIDTH}px`,
+    `--matrix-min-width:${metricMatrixMinWidth(columns)}px`,
+  ].join(";");
+}
+
+function renderMetricMatrixRow(group: MetricTimeGroup, columns: MetricTimeColumn[]) {
   return `
     <tr>
-      <td class="empty-row" colspan="8">No samples match the current filters.</td>
+      <th class="url-cell">
+        <strong>${escapeHtml(group.page)}</strong>
+        <span>${escapeHtml(group.url)}</span>
+      </th>
+      <td>
+        <strong>${escapeHtml(group.country)}</strong>
+        <span>${escapeHtml(group.countryLabel)}</span>
+      </td>
+      ${columns.map((column) => renderMetricStatusCell(group.cells.get(column.key))).join("")}
     </tr>
   `;
+}
+
+function renderMetricStatusCell(row?: MetricRow) {
+  if (!row) return `<td class="status-cell empty-status">-</td>`;
+
+  const status = cacheStatus(row);
+  const tone = row.error ? "fail" : status === "HIT" ? "hit" : isMissLike(status) ? "miss" : "other";
+  const details = renderMetricStatusDetails(row);
+
+  return `
+    <td class="status-cell">
+      <button class="status-pill status-button ${tone}" type="button" data-sample-toggle aria-expanded="false">
+        ${escapeHtml(status)}
+      </button>
+      <div class="sample-details" hidden>
+        ${details}
+      </div>
+    </td>
+  `;
+}
+
+function renderMetricStatusDetails(row: MetricRow) {
+  const status = cacheStatus(row);
+  const response = row.response_ms ? `${row.response_ms} ms` : "-";
+  const age = Number(row.age_seconds) || 0;
+  const details = [
+    ["Sample", sampleStage(row)],
+    ["Status", status],
+    ["Age", duration(age)],
+    ["Edge", row.cf_edge || "-"],
+    ["Response", response],
+    ["HTTP", row.status_code || "-"],
+    ["Fetched", row.timestamp_utc ? shortDate(row.timestamp_utc) : "-"],
+    ["Country", countryName(row.proxy_country || "-")],
+    ["Proxy", row.proxy || "-"],
+    ["CF-Ray", row.cf_ray || "-"],
+  ];
+
+  if (row.error) details.push(["Error", row.error]);
+
+  return `
+    <dl>
+      ${details.map(([label, value]) => `
+        <div>
+          <dt>${escapeHtml(label)}</dt>
+          <dd>${escapeHtml(value)}</dd>
+        </div>
+      `).join("")}
+    </dl>
+  `;
+}
+
+function sampleStage(row: MetricRow) {
+  if (!row.round) return "Sample";
+  if (row.round.endsWith("-recheck")) return `Recheck after MISS interval`;
+  return "First check";
+}
+
+function renderEmptyListRow(columns: MetricTimeColumn[] = []) {
+  return emptyTableRow("No samples match the current filters.", Math.max(2 + columns.length, 3));
 }
 
 function renderAgeRow(row: MetricsPayload["pageStats"][number]) {
@@ -486,7 +664,7 @@ function renderConfig() {
           </div>
           <div class="config-grid two">
             <label>Base URL<input name="baseUrl" value="${escapeAttr(config.baseUrl)}" /></label>
-            <label>CSV Output<input name="output" value="${escapeAttr(config.output)}" /></label>
+            <label>SQLite DB<input name="output" value="${escapeAttr(config.output)}" /></label>
           </div>
           <label>Pages<textarea name="pages" rows="12">${escapeHtml(config.pages.join("\n"))}</textarea></label>
         </section>
@@ -650,28 +828,6 @@ function proxyKey(value: string) {
   }
 }
 
-function statCard(label: string, value: string, meta: string, iconName: IconName) {
-  return `
-    <article class="stat">
-      <span class="stat-icon" aria-hidden="true">${icon(iconName)}</span>
-      <div>
-        <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(value)}</strong>
-        <small>${escapeHtml(meta)}</small>
-      </div>
-    </article>
-  `;
-}
-
-function checkbox(name: keyof Config, label: string, checked: boolean) {
-  return `
-    <label class="check">
-      <input name="${name}" type="checkbox" ${checked ? "checked" : ""} />
-      <span>${label}</span>
-    </label>
-  `;
-}
-
 function wireEvents() {
   wireActionEvents();
 
@@ -704,14 +860,21 @@ function wireEvents() {
   });
   configForm?.addEventListener("submit", saveConfig);
   proxiesForm?.addEventListener("submit", saveProxies);
+  wireMetricStatusEvents();
   wirePaginationEvents();
 }
 
 function wireActionEvents() {
-  app.querySelector('[data-action="refresh"]')?.addEventListener("click", () => loadAll());
-  app.querySelector('[data-action="start"]')?.addEventListener("click", () => postAction("/api/monitor/start"));
-  app.querySelector('[data-action="stop"]')?.addEventListener("click", () => postAction("/api/monitor/stop"));
-  app.querySelector('[data-action="run-once"]')?.addEventListener("click", () => postAction("/api/monitor/run-once"));
+  const actions: Record<string, () => void> = {
+    refresh: () => void loadAll(),
+    start: () => void postAction("/api/monitor/start"),
+    stop: () => void postAction("/api/monitor/stop"),
+    "run-once": () => void postAction("/api/monitor/run-once"),
+  };
+
+  for (const [name, handler] of Object.entries(actions)) {
+    app.querySelector(`[data-action="${name}"]`)?.addEventListener("click", handler);
+  }
 }
 
 async function postAction(path: string) {
@@ -758,15 +921,29 @@ async function saveProxies(event: SubmitEvent) {
 }
 
 function updateMetricList() {
-  const rows = filteredMetricRows();
-  const pagination = paginationInfo(rows.length);
-  const pageRows = rows.slice(pagination.start, pagination.end);
+  const samples = sampleMetricRows();
+  const rows = filteredMetricRows(samples);
+  const timeColumns = metricTimeColumns(rows);
+  const groups = metricTimeGroups(rows, timeColumns);
+  const pagination = paginationInfo(groups.length);
+  const pageGroups = groups.slice(pagination.start, pagination.end);
   const count = app.querySelector<HTMLElement>("[data-filter-count]");
+  const table = app.querySelector<HTMLTableElement>("[data-metric-table]");
+  const colgroup = app.querySelector<HTMLTableColElement>("[data-filter-cols]");
+  const head = app.querySelector<HTMLTableSectionElement>("[data-filter-head]");
   const body = app.querySelector<HTMLTableSectionElement>("[data-filter-body]");
   const paginationEl = app.querySelector<HTMLElement>("[data-pagination]");
-  if (count) count.textContent = `${rows.length} of ${metrics.latestRows.length} latest`;
-  if (body) body.innerHTML = rows.length ? pageRows.map(renderMetricListRow).join("") : renderEmptyListRow();
+  if (count) count.textContent = `${rows.length} of ${samples.length} fetched`;
+  if (table) table.setAttribute("style", metricMatrixStyle(timeColumns));
+  if (colgroup) colgroup.innerHTML = renderMetricCols(timeColumns);
+  if (head) head.innerHTML = renderMetricTimeHeader(timeColumns);
+  if (body) {
+    body.innerHTML = groups.length
+      ? pageGroups.map((group) => renderMetricMatrixRow(group, timeColumns)).join("")
+      : renderEmptyListRow(timeColumns);
+  }
   if (paginationEl) paginationEl.innerHTML = renderPaginationControls(pagination);
+  wireMetricStatusEvents();
   wirePaginationEvents();
 }
 
@@ -786,6 +963,28 @@ function wirePaginationEvents() {
       metricPagination.page += direction;
       updateMetricList();
       scrollMetricTableToTop();
+    });
+  });
+}
+
+function wireMetricStatusEvents() {
+  app.querySelectorAll<HTMLButtonElement>("[data-sample-toggle]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const cell = button.closest<HTMLElement>(".status-cell");
+      const details = cell?.querySelector<HTMLElement>(".sample-details");
+      if (!cell || !details) return;
+
+      const willOpen = details.hidden === true;
+      app.querySelectorAll<HTMLElement>(".sample-details").forEach((panel) => {
+        panel.hidden = true;
+        panel.closest(".status-cell")?.classList.remove("detail-open");
+        panel.parentElement?.querySelector<HTMLButtonElement>("[data-sample-toggle]")?.setAttribute("aria-expanded", "false");
+      });
+
+      details.hidden = !willOpen;
+      cell.classList.toggle("detail-open", willOpen);
+      button.setAttribute("aria-expanded", String(willOpen));
     });
   });
 }
@@ -841,33 +1040,6 @@ function hostLabel(value: string) {
   }
 }
 
-function icon(name: IconName) {
-  const paths: Record<IconName, string> = {
-    bars: '<path d="M5 19V11"/><path d="M12 19V5"/><path d="M19 19V8"/>',
-    calendar:
-      '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M4 10h16"/>',
-    chevronLeft: '<path d="m15 18-6-6 6-6"/>',
-    chevronRight: '<path d="m9 18 6-6-6-6"/>',
-    clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/>',
-    cloud: '<path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.2 8.4 4.8 4.8 0 0 0 7 18Z"/>',
-    gauge: '<path d="M4 15a8 8 0 1 1 16 0"/><path d="m12 15 4-5"/><path d="M12 15h.01"/>',
-    grid:
-      '<rect x="4" y="4" width="5" height="5" rx="1"/><rect x="15" y="4" width="5" height="5" rx="1"/><rect x="4" y="15" width="5" height="5" rx="1"/><rect x="15" y="15" width="5" height="5" rx="1"/>',
-    link: '<path d="M10 13a5 5 0 0 0 7.1 0l1.4-1.4a5 5 0 0 0-7.1-7.1L10.6 5.3"/><path d="M14 11a5 5 0 0 0-7.1 0l-1.4 1.4a5 5 0 0 0 7.1 7.1l.8-.8"/>',
-    pulse: '<path d="M4 13h4l2-7 4 14 2-7h4"/>',
-    refresh:
-      '<path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18 9a6 6 0 0 0-10-3.5L4 9"/><path d="M6 15a6 6 0 0 0 10 3.5l4-3.5"/>',
-    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
-    settings:
-      '<path d="M12.2 2h-.4l-.7 2.6a7.5 7.5 0 0 0-1.7.7L7 4 4 7l1.3 2.4a7.5 7.5 0 0 0-.7 1.7L2 11.8v.4l2.6.7c.2.6.4 1.2.7 1.7L4 17l3 3 2.4-1.3c.5.3 1.1.5 1.7.7l.7 2.6h.4l.7-2.6c.6-.2 1.2-.4 1.7-.7L17 20l3-3-1.3-2.4c.3-.5.5-1.1.7-1.7l2.6-.7v-.4l-2.6-.7a7.5 7.5 0 0 0-.7-1.7L20 7l-3-3-2.4 1.3a7.5 7.5 0 0 0-1.7-.7L12.2 2Z"/><circle cx="12" cy="12" r="3"/>',
-    shuffle:
-      '<path d="M4 7h3c4 0 5 10 9 10h4"/><path d="M16 13l4 4-4 4"/><path d="M4 17h3c1.8 0 3-1.8 4.1-3.8"/><path d="M16 3l4 4-4 4"/><path d="M14 7h6"/>',
-    timer: '<path d="M10 2h4"/><path d="M12 14l3-3"/><circle cx="12" cy="14" r="8"/>',
-    user: '<path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/>',
-  };
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
-}
-
 function countryName(code: string) {
   const names: Record<string, string> = {
     AU: "Australia",
@@ -896,16 +1068,6 @@ function uniqueValues(values: string[]) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
-function filterOptions(values: string[], selected: string, label = (value: string) => value) {
-  return values
-    .map((value) => {
-      const text = label(value);
-      const suffix = text === value ? "" : ` - ${text}`;
-      return `<option value="${escapeAttr(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value + suffix)}</option>`;
-    })
-    .join("");
-}
-
 function duration(seconds: number) {
   if (!seconds) return "0s";
   const days = Math.floor(seconds / 86400);
@@ -930,14 +1092,6 @@ function shortDate(value: string) {
 
 function isMissLike(status: string) {
   return ["MISS", "BYPASS", "DYNAMIC", "EXPIRED", "REVALIDATED", "STALE", "UPDATING"].includes(status);
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
-}
-
-function escapeAttr(value: string) {
-  return escapeHtml(value).replace(/`/g, "&#96;");
 }
 
 loadAll()

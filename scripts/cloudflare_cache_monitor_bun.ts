@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { appendMetricRows, DEFAULT_METRICS_DB, normalizeMetricsOutput } from "../src/metrics-db";
 
 const PROXIFLY =
   "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/all/data.json";
@@ -45,26 +45,6 @@ const COUNTRY_NAMES: Record<string, string> = {
 const COUNTRY_CODES_BY_NAME = Object.fromEntries(
   Object.entries(COUNTRY_NAMES).map(([code, name]) => [name.toLowerCase(), code]),
 );
-const FIELDS = [
-  "timestamp_utc",
-  "round",
-  "page",
-  "url",
-  "proxy",
-  "proxy_country",
-  "status_code",
-  "cf_cache_status",
-  "cf_ray",
-  "cf_edge",
-  "age_seconds",
-  "response_ms",
-  "content_length",
-  "content_type",
-  "cache_control",
-  "server",
-  "error",
-];
-
 type ProxyItem = { url: string | null; country: string };
 type Metrics = Record<string, string>;
 
@@ -76,9 +56,10 @@ function parseArgs() {
     clarketmStatusSource: CLARKETM_STATUS,
     proxyCountries: COUNTRIES.map((country) => COUNTRY_NAMES[country]).join(","),
     maxProxiesPerCountry: 25,
-    output: "storage/cloudflare-cache-metrics.csv",
+    output: DEFAULT_METRICS_DB,
     rounds: 1,
     interval: 300,
+    missRecheckDelay: 0,
     timeout: 5,
     delay: 0,
     noDirect: false,
@@ -98,6 +79,7 @@ function parseArgs() {
     "--output": "output",
     "--rounds": "rounds",
     "--interval": "interval",
+    "--miss-recheck-delay": "missRecheckDelay",
     "--timeout": "timeout",
     "--delay": "delay",
     "--user-agent": "userAgent",
@@ -114,7 +96,7 @@ function parseArgs() {
       const key = map[arg];
       const value = Bun.argv[++i];
       if (!value || value.startsWith("--")) usage(1);
-      args[key] = ["maxProxiesPerCountry", "rounds", "interval", "timeout", "delay"].includes(key)
+      args[key] = ["maxProxiesPerCountry", "rounds", "interval", "missRecheckDelay", "timeout", "delay"].includes(key)
         ? Number(value)
         : value;
     } else {
@@ -122,6 +104,8 @@ function parseArgs() {
       usage(1);
     }
   }
+
+  args.output = normalizeMetricsOutput(String(args.output));
 
   return args as {
     baseUrl: string;
@@ -135,6 +119,7 @@ function parseArgs() {
     output: string;
     rounds: number;
     interval: number;
+    missRecheckDelay: number;
     timeout: number;
     delay: number;
     noDirect: boolean;
@@ -152,7 +137,8 @@ Options:
   --max-proxies-per-country 25
   --rounds 1              0 = forever
   --timeout 5
-  --output storage/cloudflare-cache-metrics.csv
+  --miss-recheck-delay 0  seconds to wait before rechecking MISS-like samples
+  --output storage/cloudflare-cache-metrics.sqlite
   --no-direct
   --no-proxy-source
   --no-clarketm-source
@@ -477,6 +463,11 @@ function useful(metrics: Metrics) {
   return Boolean(metrics.status_code && metrics.cf_ray && metrics.cf_cache_status);
 }
 
+function isMissLike(metrics: Metrics) {
+  const status = String(metrics.cf_cache_status || "").toUpperCase();
+  return ["MISS", "BYPASS", "DYNAMIC", "EXPIRED", "REVALIDATED", "STALE", "UPDATING"].includes(status);
+}
+
 function fit(value: string, width: number) {
   if (value.length > width) return value.slice(0, width - 1) + ".";
   return value.padEnd(width);
@@ -504,21 +495,8 @@ function logRow(row: Metrics, attempt: string) {
   );
 }
 
-function csvCell(value: string) {
-  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
 async function appendRows(output: string, rows: Metrics[]) {
-  await mkdir(dirname(output), { recursive: true });
-  let needsHeader = true;
-  try {
-    needsHeader = (await stat(output)).size === 0;
-  } catch {
-    needsHeader = true;
-  }
-
-  const lines = rows.map((row) => FIELDS.map((field) => csvCell(row[field] || "")).join(","));
-  await appendFile(output, `${needsHeader ? `${FIELDS.join(",")}\n` : ""}${lines.join("\n")}\n`, "utf8");
+  await appendMetricRows(output, rows);
 }
 
 function proxyLabel(proxy: string | null) {
@@ -542,6 +520,7 @@ async function main() {
   for (let round = 1; args.rounds === 0 || round <= args.rounds; round++) {
     const proxies = await loadProxies(args);
     const rows: Metrics[] = [];
+    const rechecks: { page: string; url: string; proxy: ProxyItem }[] = [];
 
     for (const page of pages) {
       const url = pageUrl(args.baseUrl, page);
@@ -563,13 +542,44 @@ async function main() {
           logRow(row, `${index + 1}/${group.length}`);
 
           if (args.delay) await sleep(args.delay);
-          if (useful(metrics)) break;
+          if (useful(metrics)) {
+            if (args.missRecheckDelay > 0 && isMissLike(metrics)) {
+              rechecks.push({ page, url, proxy });
+            }
+            break;
+          }
         }
       }
     }
 
     await appendRows(args.output, rows);
     console.log(`saved ${rows.length} rows -> ${args.output}`);
+
+    if (rechecks.length && args.missRecheckDelay > 0) {
+      console.log(`waiting ${args.missRecheckDelay}s to recheck ${rechecks.length} MISS-like samples`);
+      await sleep(args.missRecheckDelay);
+
+      const recheckRows: Metrics[] = [];
+      for (const target of rechecks) {
+        const metrics = await request(target.url, target.proxy.url, args.timeout, args.userAgent);
+        const row = {
+          timestamp_utc: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"),
+          round: `${round}-recheck`,
+          page: target.page,
+          url: target.url,
+          proxy: proxyLabel(target.proxy.url),
+          proxy_country: countryName(target.proxy.country),
+          ...metrics,
+        };
+        recheckRows.push(row);
+        logRow(row, "rechk");
+        if (args.delay) await sleep(args.delay);
+      }
+
+      await appendRows(args.output, recheckRows);
+      console.log(`saved ${recheckRows.length} recheck rows -> ${args.output}`);
+    }
+
     if (args.rounds === 0 || round < args.rounds) await sleep(args.interval);
   }
 }

@@ -1,8 +1,13 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Cron } from "croner";
 import index from "../public/index.html";
+import {
+  DEFAULT_METRICS_DB,
+  normalizeMetricsOutput,
+  readMetricRows,
+  type MetricRow,
+} from "./metrics-db";
 
 type Config = {
   baseUrl: string;
@@ -21,7 +26,12 @@ type Config = {
   userAgent: string;
 };
 
-type MetricRow = Record<string, string>;
+type MetricTimeColumn = {
+  key: string;
+  label: string;
+  meta: string;
+  sort: number;
+};
 
 type MonitorState = {
   running: boolean;
@@ -61,7 +71,7 @@ const defaultPages = [
 const defaultConfig: Config = {
   baseUrl: "https://ummah.one",
   pages: defaultPages,
-  output: "scripts/storage/cloudflare-cache-metrics.csv",
+  output: DEFAULT_METRICS_DB,
   proxyCountries: "Bangladesh,India,United States,United Kingdom,Canada,Germany,France,Singapore,Japan,Australia",
   maxProxiesPerCountry: 8,
   timeout: 5,
@@ -89,6 +99,8 @@ const state: MonitorState = {
 };
 
 let scheduledJob: Cron | null = null;
+let activeMonitorProcess: ReturnType<typeof Bun.spawn> | null = null;
+let stopRequested = false;
 let broadcastTimer: Timer | null = null;
 let broadcastInFlight = false;
 let broadcastAgain = false;
@@ -99,8 +111,11 @@ function json(data: unknown, status = 200) {
 }
 
 function fail(error: unknown, status = 500) {
-  const message = error instanceof Error ? error.message : String(error);
-  return json({ error: message }, status);
+  return json({ error: errorMessage(error) }, status);
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function exists(path: string) {
@@ -134,7 +149,7 @@ function sanitizeConfig(value: Config): Config {
     hitIntervalSeconds: clamp(Number(value.hitIntervalSeconds), 15, 86400, 900),
     missIntervalSeconds: clamp(Number(value.missIntervalSeconds), 15, 86400, 120),
     baseUrl: String(value.baseUrl || defaultConfig.baseUrl).trim(),
-    output: String(value.output || defaultConfig.output).trim(),
+    output: normalizeMetricsOutput(String(value.output || defaultConfig.output).trim()),
     proxyCountries: String(value.proxyCountries || defaultConfig.proxyCountries).trim(),
     userAgent: String(value.userAgent || defaultConfig.userAgent).trim(),
     noDirect: Boolean(value.noDirect),
@@ -180,7 +195,7 @@ async function buildRuntimePayload() {
   const config = await readConfig();
   return {
     type: "runtime",
-    metrics: buildMetrics(config),
+    metrics: await buildMetrics(config),
     status: snapshotState(),
   };
 }
@@ -261,9 +276,66 @@ async function runMonitorRound(reason: string) {
   state.nextRunAt = null;
   queueRuntimeBroadcast();
 
-  const config = await readConfig();
-  await ensureRunFiles(config);
+  let config: Config | null = null;
+  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  stopRequested = false;
 
+  try {
+    config = await readConfig();
+    await ensureRunFiles(config);
+
+    if (stopRequested) {
+      pushLog(`[${new Date().toLocaleString()}] round ${state.round} stopped before collector start`);
+      return { skipped: false };
+    }
+
+    const args = monitorArgs(config);
+    const started = new Date();
+    state.lastRunAt = started.toISOString();
+    pushLog(`[${started.toLocaleString()}] round ${state.round} started (${reason})`);
+    pushLog(`collector args: ${args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(" ")}`);
+
+    proc = Bun.spawn([process.execPath, ...args], {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    activeMonitorProcess = proc;
+
+    const [exitCode] = await Promise.all([
+      proc.exited,
+      pipeProcessOutput(proc.stdout),
+      pipeProcessOutput(proc.stderr, "stderr: "),
+    ]);
+
+    state.lastExitCode = exitCode;
+
+    if (exitCode !== 0) {
+      if (stopRequested) {
+        pushLog(`[${new Date().toLocaleString()}] round ${state.round} stopped`);
+      } else {
+        state.lastError = `collector exited with code ${exitCode}`;
+        pushLog(state.lastError);
+      }
+    } else {
+      pushLog(`[${new Date().toLocaleString()}] round ${state.round} finished`);
+    }
+  } catch (error) {
+    state.lastExitCode = 1;
+    state.lastError = errorMessage(error);
+    pushLog(state.lastError);
+  } finally {
+    if (activeMonitorProcess === proc) activeMonitorProcess = null;
+    stopRequested = false;
+    state.busy = false;
+    queueRuntimeBroadcast();
+  }
+
+  if (state.running && config) void scheduleNext(config);
+  return { skipped: false };
+}
+
+function monitorArgs(config: Config) {
   const args = [
     join(root, "scripts", "cloudflare_cache_monitor_bun.ts"),
     "--base-url",
@@ -276,6 +348,8 @@ async function runMonitorRound(reason: string) {
     config.output,
     "--rounds",
     "1",
+    "--miss-recheck-delay",
+    String(config.missIntervalSeconds),
     "--timeout",
     String(config.timeout),
     "--delay",
@@ -292,63 +366,33 @@ async function runMonitorRound(reason: string) {
   if (config.noProxySource) args.push("--no-proxy-source");
   if (config.noClarketmSource) args.push("--no-clarketm-source");
   if (config.shuffleProxies) args.push("--shuffle-proxies");
-
-  const started = new Date();
-  state.lastRunAt = started.toISOString();
-  pushLog(`[${started.toLocaleString()}] round ${state.round} started (${reason})`);
-  pushLog(`collector args: ${args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(" ")}`);
-
-  try {
-    const proc = Bun.spawn([process.execPath, ...args], {
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [exitCode] = await Promise.all([
-      proc.exited,
-      pipeProcessOutput(proc.stdout),
-      pipeProcessOutput(proc.stderr, "stderr: "),
-    ]);
-
-    state.lastExitCode = exitCode;
-
-    if (exitCode !== 0) {
-      state.lastError = `collector exited with code ${exitCode}`;
-      pushLog(state.lastError);
-    } else {
-      pushLog(`[${new Date().toLocaleString()}] round ${state.round} finished`);
-    }
-  } catch (error) {
-    state.lastExitCode = 1;
-    state.lastError = error instanceof Error ? error.message : String(error);
-    pushLog(state.lastError);
-  } finally {
-    state.busy = false;
-    queueRuntimeBroadcast();
-  }
-
-  if (state.running) scheduleNext(config);
-  return { skipped: false };
+  return args;
 }
 
 async function startMonitor() {
   if (state.running) return;
   state.running = true;
   state.startedAt = new Date().toISOString();
-  runMonitorRound("start").catch((error) => {
-    state.busy = false;
-    state.lastError = error instanceof Error ? error.message : String(error);
-    pushLog(state.lastError);
-    readConfig().then(scheduleNext).catch(() => {});
-  });
+  void runMonitorRound("start");
 }
 
 function stopMonitor() {
   state.running = false;
   state.nextRunAt = null;
   clearScheduledJob();
+  stopActiveMonitor();
   pushLog(`[${new Date().toLocaleString()}] monitor stopped`);
   queueRuntimeBroadcast();
+}
+
+function stopActiveMonitor() {
+  stopRequested = true;
+  if (!activeMonitorProcess) return;
+  try {
+    activeMonitorProcess.kill();
+  } catch (error) {
+    pushLog(`failed to stop collector: ${errorMessage(error)}`);
+  }
 }
 
 function clearScheduledJob() {
@@ -357,91 +401,36 @@ function clearScheduledJob() {
   scheduledJob = null;
 }
 
-function scheduleNext(config: Config) {
+async function scheduleNext(config: Config) {
   if (!state.running) return;
   clearScheduledJob();
 
-  const summary = buildMetrics(config).summary;
-  const delay =
-    summary.latestMissLike > 0 || summary.latestErrors > 0 ? config.missIntervalSeconds : config.hitIntervalSeconds;
+  let delay = config.hitIntervalSeconds;
+  try {
+    const summary = (await buildMetrics(config)).summary;
+    delay =
+      summary.latestMissLike > 0 || summary.latestErrors > 0 ? config.missIntervalSeconds : config.hitIntervalSeconds;
+  } catch (error) {
+    pushLog(`schedule metrics read failed: ${errorMessage(error)}`);
+  }
+
   const next = new Date(Date.now() + delay * 1000);
   state.nextRunAt = next.toISOString();
   pushLog(`[${new Date().toLocaleString()}] next run in ${delay}s`);
 
   scheduledJob = new Cron(next, { name: "cloudflare-cache-monitor-next-run", maxRuns: 1, protect: true }, () => {
     scheduledJob = null;
-    runMonitorRound("schedule").catch((error) => {
-      state.busy = false;
-      state.lastError = error instanceof Error ? error.message : String(error);
-      pushLog(state.lastError);
-      scheduleNext(config);
-    });
+    void runMonitorRound("schedule");
   });
 }
 
-function readMetricsRows(output: string): MetricRow[] {
-  const path = join(root, output);
-  if (!existsSync(path)) return [];
-  const text = readFileSync(path, "utf8");
-  const parsed = parseCsv(text);
-  if (parsed.length < 2) return [];
-  const header = parsed[0];
-  return parsed
-    .slice(1)
-    .filter((cells) => cells.some(Boolean))
-    .map((cells) => Object.fromEntries(header.map((field, index) => [field, cells[index] || ""])));
-}
-
-function parseCsv(text: string) {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const next = text[i + 1];
-
-    if (quoted) {
-      if (char === '"' && next === '"') {
-        cell += '"';
-        i += 1;
-      } else if (char === '"') {
-        quoted = false;
-      } else {
-        cell += char;
-      }
-      continue;
-    }
-
-    if (char === '"') quoted = true;
-    else if (char === ",") {
-      row.push(cell);
-      cell = "";
-    } else if (char === "\n") {
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-    } else if (char !== "\r") {
-      cell += char;
-    }
-  }
-
-  if (cell || row.length) {
-    row.push(cell);
-    rows.push(row);
-  }
-
-  return rows;
-}
-
-function buildMetrics(config: Config) {
-  const rows = readMetricsRows(config.output);
+async function buildMetrics(config: Config) {
+  const rows = await readMetricRows(config.output, root);
+  const timeColumns = metricTimeColumns(rows);
   const latest = new Map<string, MetricRow>();
 
   for (const row of rows) {
-    const normalizedRow = { ...row, proxy_country: normalizeCountry(row.proxy_country || "unknown") };
+    const normalizedRow: MetricRow = { ...row, proxy_country: normalizeCountry(row.proxy_country || "unknown") };
     const key = `${normalizedRow.page}|${normalizedRow.proxy_country}`;
     const existing = latest.get(key);
     if (!existing || Date.parse(normalizedRow.timestamp_utc) >= Date.parse(existing.timestamp_utc)) {
@@ -489,7 +478,43 @@ function buildMetrics(config: Config) {
     lastTimestamp: rows.at(-1)?.timestamp_utc || null,
   };
 
-  return { rows: rows.slice(-400), latestRows, countries, pages, pageStats, matrix, summary };
+  return { rows, latestRows, countries, pages, pageStats, matrix, timeColumns, summary };
+}
+
+function metricTimeColumns(rows: MetricRow[]) {
+  const columns = new Map<string, MetricTimeColumn>();
+  for (const row of rows) {
+    const column = metricTimeColumn(row.timestamp_utc || "");
+    if (!columns.has(column.key)) columns.set(column.key, column);
+  }
+  return [...columns.values()].sort((a, b) => a.sort - b.sort);
+}
+
+function metricTimeColumn(value: string): MetricTimeColumn {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return { key: "unknown", label: "-", meta: "No time", sort: Number.MAX_SAFE_INTEGER };
+  }
+
+  const key = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+  ].join("-");
+
+  return {
+    key,
+    label: date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    meta: date.toLocaleDateString([], { month: "short", day: "numeric" }),
+    sort:
+      date.getFullYear() * 100000000 +
+      (date.getMonth() + 1) * 1000000 +
+      date.getDate() * 10000 +
+      date.getHours() * 100 +
+      date.getMinutes(),
+  };
 }
 
 function isMissLike(row: MetricRow) {
@@ -543,7 +568,7 @@ const server = Bun.serve({
     "/api/metrics": {
       async GET() {
         const config = await readConfig();
-        return json(buildMetrics(config));
+        return json(await buildMetrics(config));
       },
     },
     "/api/proxies": {
@@ -582,11 +607,7 @@ const server = Bun.serve({
     },
     "/api/monitor/run-once": {
       async POST() {
-        runMonitorRound("manual").catch((error) => {
-          state.busy = false;
-          state.lastError = error instanceof Error ? error.message : String(error);
-          pushLog(state.lastError);
-        });
+        void runMonitorRound("manual");
         return json(state);
       },
     },
