@@ -1,6 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Cron } from "croner";
 import index from "../public/index.html";
 
 type Config = {
@@ -87,7 +88,11 @@ const state: MonitorState = {
   logs: [],
 };
 
-let timer: Timer | null = null;
+let scheduledJob: Cron | null = null;
+let broadcastTimer: Timer | null = null;
+let broadcastInFlight = false;
+let broadcastAgain = false;
+const sockets = new Set<{ send(data: string): void }>();
 
 function json(data: unknown, status = 200) {
   return Response.json(data, { status });
@@ -164,6 +169,58 @@ async function readProxyText() {
 function pushLog(line: string) {
   state.logs.push(line);
   state.logs = state.logs.slice(-160);
+  queueRuntimeBroadcast();
+}
+
+function snapshotState(): MonitorState {
+  return { ...state, logs: [...state.logs] };
+}
+
+async function buildRuntimePayload() {
+  const config = await readConfig();
+  return {
+    type: "runtime",
+    metrics: buildMetrics(config),
+    status: snapshotState(),
+  };
+}
+
+function queueRuntimeBroadcast() {
+  if (!sockets.size) return;
+  if (broadcastTimer) clearTimeout(broadcastTimer);
+  broadcastTimer = setTimeout(() => {
+    broadcastTimer = null;
+    broadcastRuntime().catch((error) => console.error("websocket broadcast failed", error));
+  }, 100);
+}
+
+async function broadcastRuntime() {
+  if (broadcastInFlight) {
+    broadcastAgain = true;
+    return;
+  }
+
+  broadcastInFlight = true;
+  try {
+    const message = JSON.stringify(await buildRuntimePayload());
+    for (const socket of sockets) {
+      try {
+        socket.send(message);
+      } catch {
+        sockets.delete(socket);
+      }
+    }
+  } finally {
+    broadcastInFlight = false;
+    if (broadcastAgain) {
+      broadcastAgain = false;
+      queueRuntimeBroadcast();
+    }
+  }
+}
+
+async function sendRuntime(socket: { send(data: string): void }) {
+  socket.send(JSON.stringify(await buildRuntimePayload()));
 }
 
 async function pipeProcessOutput(stream: ReadableStream<Uint8Array> | null, label = "") {
@@ -202,6 +259,7 @@ async function runMonitorRound(reason: string) {
   state.lastReason = reason;
   state.lastError = null;
   state.nextRunAt = null;
+  queueRuntimeBroadcast();
 
   const config = await readConfig();
   await ensureRunFiles(config);
@@ -266,6 +324,7 @@ async function runMonitorRound(reason: string) {
     pushLog(state.lastError);
   } finally {
     state.busy = false;
+    queueRuntimeBroadcast();
   }
 
   if (state.running) scheduleNext(config);
@@ -287,14 +346,20 @@ async function startMonitor() {
 function stopMonitor() {
   state.running = false;
   state.nextRunAt = null;
-  if (timer) clearTimeout(timer);
-  timer = null;
+  clearScheduledJob();
   pushLog(`[${new Date().toLocaleString()}] monitor stopped`);
+  queueRuntimeBroadcast();
+}
+
+function clearScheduledJob() {
+  if (!scheduledJob) return;
+  scheduledJob.stop();
+  scheduledJob = null;
 }
 
 function scheduleNext(config: Config) {
   if (!state.running) return;
-  if (timer) clearTimeout(timer);
+  clearScheduledJob();
 
   const summary = buildMetrics(config).summary;
   const delay =
@@ -302,14 +367,16 @@ function scheduleNext(config: Config) {
   const next = new Date(Date.now() + delay * 1000);
   state.nextRunAt = next.toISOString();
   pushLog(`[${new Date().toLocaleString()}] next run in ${delay}s`);
-  timer = setTimeout(() => {
+
+  scheduledJob = new Cron(next, { name: "cloudflare-cache-monitor-next-run", maxRuns: 1, protect: true }, () => {
+    scheduledJob = null;
     runMonitorRound("schedule").catch((error) => {
       state.busy = false;
       state.lastError = error instanceof Error ? error.message : String(error);
       pushLog(state.lastError);
       scheduleNext(config);
     });
-  }, delay * 1000);
+  });
 }
 
 function readMetricsRows(output: string): MetricRow[] {
@@ -385,7 +452,17 @@ function buildMetrics(config: Config) {
   const latestRows = [...latest.values()].sort((a, b) =>
     `${a.page}|${a.proxy_country}`.localeCompare(`${b.page}|${b.proxy_country}`),
   );
-  const countries = [...new Set(latestRows.map((row) => row.proxy_country || "unknown"))].sort();
+  const configuredCountries = config.proxyCountries
+    .split(",")
+    .map((country) => normalizeCountry(country))
+    .filter(Boolean);
+  const countries = [
+    ...new Set([
+      ...(!config.noDirect ? ["direct"] : []),
+      ...configuredCountries,
+      ...latestRows.map((row) => row.proxy_country || "unknown"),
+    ]),
+  ].sort((a, b) => (a === "direct" ? -1 : b === "direct" ? 1 : a.localeCompare(b)));
   const pages = [...new Set([...config.pages, ...latestRows.map((row) => row.page)].filter(Boolean))];
   const pageStats = pages.map((page) => {
     const pageRows = latestRows.filter((row) => row.page === page);
@@ -456,6 +533,7 @@ const server = Bun.serve({
         try {
           const config = sanitizeConfig(await req.json());
           await saveConfig(config);
+          queueRuntimeBroadcast();
           return json(config);
         } catch (error) {
           return fail(error, 400);
@@ -481,6 +559,7 @@ const server = Bun.serve({
         const body = await req.json();
         await mkdir(storageDir, { recursive: true });
         await writeFile(proxiesPath, String(body.text || ""), "utf8");
+        queueRuntimeBroadcast();
         return json({ ok: true });
       },
     },
@@ -516,8 +595,25 @@ const server = Bun.serve({
     hmr: true,
     console: true,
   },
-  fetch() {
+  fetch(req, server) {
+    if (new URL(req.url).pathname === "/ws") {
+      if (server.upgrade(req)) return;
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    }
     return new Response("Not found", { status: 404 });
+  },
+  websocket: {
+    open(socket) {
+      sockets.add(socket);
+      sendRuntime(socket).catch((error) => {
+        sockets.delete(socket);
+        console.error("websocket initial send failed", error);
+      });
+    },
+    close(socket) {
+      sockets.delete(socket);
+    },
+    message() {},
   },
 });
 
