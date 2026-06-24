@@ -1,7 +1,6 @@
 import { checkbox, emptyTableRow, escapeAttr, escapeHtml, filterOptions, icon, statCard } from "./components";
 
 type Config = {
-  baseUrl: string;
   pages: string[];
   output: string;
   proxyCountries: string;
@@ -227,7 +226,7 @@ function render() {
 
     <section class="hero" data-region="hero">
       <div class="domain-line">
-        <h1>${escapeHtml(hostLabel(config.baseUrl))}</h1>
+        <h1>${escapeHtml(targetLabel(config.pages))}</h1>
         <span class="state-dot ${statusState.busy || statusState.running ? "on" : ""}" data-status-dot aria-hidden="true"></span>
         <span class="state-text" data-status-label>${escapeHtml(runtimeStatusLabel())}</span>
       </div>
@@ -653,7 +652,7 @@ function renderConfig() {
     <form class="form-panel config-panel" data-form="config">
       <div class="section-head">
         <h2><span class="section-icon" aria-hidden="true">${icon("settings")}</span>Configuration</h2>
-        <span>${config.pages.length} pages</span>
+        <span>${config.pages.length} URLs</span>
       </div>
 
       <div class="config-body">
@@ -663,10 +662,9 @@ function renderConfig() {
             <h3>Target</h3>
           </div>
           <div class="config-grid two">
-            <label>Base URL<input name="baseUrl" value="${escapeAttr(config.baseUrl)}" /></label>
             <label>SQLite DB<input name="output" value="${escapeAttr(config.output)}" /></label>
           </div>
-          <label>Pages<textarea name="pages" rows="12">${escapeHtml(config.pages.join("\n"))}</textarea></label>
+          <label>URLs<textarea name="pages" rows="12">${escapeHtml(config.pages.join("\n"))}</textarea></label>
         </section>
 
         <section class="form-section">
@@ -888,7 +886,6 @@ async function saveConfig(event: SubmitEvent) {
   const data = new FormData(form);
   const next: Config = {
     ...config,
-    baseUrl: String(data.get("baseUrl") || ""),
     pages: String(data.get("pages") || "")
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -1030,6 +1027,13 @@ function renderPaginationControls(pagination: ReturnType<typeof paginationInfo>)
 function scrollMetricTableToTop() {
   const scroll = app.querySelector<HTMLElement>(".table-scroll");
   if (scroll) scroll.scrollTop = 0;
+}
+
+function targetLabel(values: string[]) {
+  const hosts = uniqueValues(values.map(hostLabel).filter(Boolean));
+  if (!hosts.length) return "Targets";
+  if (hosts.length === 1) return hosts[0];
+  return `${hosts.length} hosts`;
 }
 
 function hostLabel(value: string) {

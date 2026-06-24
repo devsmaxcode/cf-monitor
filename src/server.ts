@@ -10,7 +10,6 @@ import {
 } from "./metrics-db";
 
 type Config = {
-  baseUrl: string;
   pages: string[];
   output: string;
   proxyCountries: string;
@@ -51,25 +50,25 @@ const storageDir = join(root, "storage");
 const configPath = join(storageDir, "dashboard-config.json");
 const pagesPath = join(storageDir, "pages.txt");
 const proxiesPath = join(storageDir, "proxies.txt");
+const legacyDefaultBaseUrl = "https://ummah.one";
 
 const defaultPages = [
-  "/",
-  "/quran",
-  "/quran/al-fatihah",
-  "/quran/al-baqarah",
-  "/quran/juz/1",
-  "/quran/page/1",
-  "/hadith/books",
-  "/dua",
-  "/dua/categories",
-  "/dua/all-duas",
-  "/99-names-of-allah",
-  "/zakat-calculator",
-  "/tahakiks",
+  "https://ummah.one/",
+  "https://ummah.one/quran",
+  "https://ummah.one/quran/al-fatihah",
+  "https://ummah.one/quran/al-baqarah",
+  "https://ummah.one/quran/juz/1",
+  "https://ummah.one/quran/page/1",
+  "https://ummah.one/hadith/books",
+  "https://ummah.one/dua",
+  "https://ummah.one/dua/categories",
+  "https://ummah.one/dua/all-duas",
+  "https://ummah.one/99-names-of-allah",
+  "https://ummah.one/zakat-calculator",
+  "https://ummah.one/tahakiks",
 ];
 
 const defaultConfig: Config = {
-  baseUrl: "https://ummah.one",
   pages: defaultPages,
   output: DEFAULT_METRICS_DB,
   proxyCountries: "Bangladesh,India,United States,United Kingdom,Canada,Germany,France,Singapore,Japan,Australia",
@@ -137,18 +136,20 @@ async function readConfig(): Promise<Config> {
   return sanitizeConfig({ ...defaultConfig, ...stored });
 }
 
-function sanitizeConfig(value: Config): Config {
+function sanitizeConfig(value: Partial<Config> & { baseUrl?: string }): Config {
+  const { baseUrl, ...configValue } = value;
+  const legacyBaseUrl = String(baseUrl || legacyDefaultBaseUrl).trim();
   return {
-    ...value,
+    ...defaultConfig,
+    ...configValue,
     pages: Array.isArray(value.pages)
-      ? value.pages.map((page) => String(page).trim()).filter(Boolean)
+      ? value.pages.map((page) => normalizeTargetUrl(String(page).trim(), legacyBaseUrl)).filter(Boolean)
       : defaultPages,
     maxProxiesPerCountry: clamp(Number(value.maxProxiesPerCountry), 1, 100, 8),
     timeout: clamp(Number(value.timeout), 1, 60, 5),
     delay: clamp(Number(value.delay), 0, 60, 0),
     hitIntervalSeconds: clamp(Number(value.hitIntervalSeconds), 15, 86400, 900),
     missIntervalSeconds: clamp(Number(value.missIntervalSeconds), 15, 86400, 120),
-    baseUrl: String(value.baseUrl || defaultConfig.baseUrl).trim(),
     output: normalizeMetricsOutput(String(value.output || defaultConfig.output).trim()),
     proxyCountries: String(value.proxyCountries || defaultConfig.proxyCountries).trim(),
     userAgent: String(value.userAgent || defaultConfig.userAgent).trim(),
@@ -157,6 +158,19 @@ function sanitizeConfig(value: Config): Config {
     noClarketmSource: Boolean(value.noClarketmSource),
     shuffleProxies: Boolean(value.shuffleProxies),
   };
+}
+
+function normalizeTargetUrl(value: string, legacyBaseUrl = legacyDefaultBaseUrl) {
+  if (!value) return "";
+  try {
+    return new URL(value).toString();
+  } catch {
+    try {
+      return new URL(value.replace(/^\/+/, ""), legacyBaseUrl.replace(/\/?$/, "/")).toString();
+    } catch {
+      return value;
+    }
+  }
 }
 
 function clamp(value: number, min: number, max: number, fallback: number) {
@@ -338,8 +352,6 @@ async function runMonitorRound(reason: string) {
 function monitorArgs(config: Config) {
   const args = [
     join(root, "scripts", "cloudflare_cache_monitor_bun.ts"),
-    "--base-url",
-    config.baseUrl,
     "--pages",
     pagesPath,
     "--proxies",

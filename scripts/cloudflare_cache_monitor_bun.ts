@@ -9,26 +9,27 @@ const CLARKETM = "https://raw.githubusercontent.com/clarketm/proxy-list/master/p
 const CLARKETM_STATUS =
   "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-status.txt";
 const COUNTRIES = ["BD", "IN", "US", "GB", "CA", "DE", "FR", "SG", "JP", "AU"];
+const LEGACY_DEFAULT_BASE_URL = "https://ummah.one";
 const DEFAULT_PAGES = [
-  "/",
-  "/quran",
-  "/quran/al-fatihah",
-  "/quran/al-baqarah",
-  "/quran/juz/1",
-  "/quran/page/1",
-  "/hadith/books",
-  "/dua",
-  "/dua/categories",
-  "/dua/all-duas",
-  "/ruqyah",
-  "/videos",
-  "/99-names-of-allah",
-  "/zakat-calculator",
-  "/projects",
-  "/about-us",
-  "/contact-us",
-  "/privacy-policy",
-  "/tahakiks",
+  "https://ummah.one/",
+  "https://ummah.one/quran",
+  "https://ummah.one/quran/al-fatihah",
+  "https://ummah.one/quran/al-baqarah",
+  "https://ummah.one/quran/juz/1",
+  "https://ummah.one/quran/page/1",
+  "https://ummah.one/hadith/books",
+  "https://ummah.one/dua",
+  "https://ummah.one/dua/categories",
+  "https://ummah.one/dua/all-duas",
+  "https://ummah.one/ruqyah",
+  "https://ummah.one/videos",
+  "https://ummah.one/99-names-of-allah",
+  "https://ummah.one/zakat-calculator",
+  "https://ummah.one/projects",
+  "https://ummah.one/about-us",
+  "https://ummah.one/contact-us",
+  "https://ummah.one/privacy-policy",
+  "https://ummah.one/tahakiks",
 ];
 const COUNTRY_NAMES: Record<string, string> = {
   BD: "Bangladesh",
@@ -50,7 +51,6 @@ type Metrics = Record<string, string>;
 
 function parseArgs() {
   const args: Record<string, string | number | boolean> = {
-    baseUrl: "https://ummah.one",
     proxySource: PROXIFLY,
     clarketmSource: CLARKETM,
     clarketmStatusSource: CLARKETM_STATUS,
@@ -68,7 +68,6 @@ function parseArgs() {
   };
 
   const map: Record<string, string> = {
-    "--base-url": "baseUrl",
     "--pages": "pages",
     "--proxies": "proxies",
     "--proxy-source": "proxySource",
@@ -108,7 +107,6 @@ function parseArgs() {
   args.output = normalizeMetricsOutput(String(args.output));
 
   return args as {
-    baseUrl: string;
     pages?: string;
     proxies?: string;
     proxySource: string;
@@ -132,7 +130,7 @@ function usage(code: number): never {
   console.log(`Usage: bun cloudflare_cache_monitor_bun.ts [options]
 
 Options:
-  --pages pages.txt       default: ${DEFAULT_PAGES.length} common Ummah One pages
+  --pages pages.txt       full target URLs, default: ${DEFAULT_PAGES.length} common Ummah One URLs
   --proxy-countries Bangladesh,India,United States
   --max-proxies-per-country 25
   --rounds 1              0 = forever
@@ -155,11 +153,11 @@ async function readList(path?: string) {
     .filter((line) => line && !line.startsWith("#"));
 }
 
-function pageUrl(baseUrl: string, page: string) {
+function targetUrl(value: string) {
   try {
-    return new URL(page).toString();
+    return new URL(value).toString();
   } catch {
-    return new URL(page.replace(/^\/+/, ""), baseUrl.replace(/\/?$/, "/")).toString();
+    return new URL(value.replace(/^\/+/, ""), LEGACY_DEFAULT_BASE_URL.replace(/\/?$/, "/")).toString();
   }
 }
 
@@ -515,7 +513,7 @@ const sleep = (seconds: number) => new Promise((resolve) => setTimeout(resolve, 
 async function main() {
   const args = parseArgs();
   const pageList = await readList(args.pages);
-  const pages = pageList.length ? pageList : DEFAULT_PAGES;
+  const pages = (pageList.length ? pageList : DEFAULT_PAGES).map(targetUrl);
 
   for (let round = 1; args.rounds === 0 || round <= args.rounds; round++) {
     const proxies = await loadProxies(args);
@@ -523,7 +521,7 @@ async function main() {
     const rechecks: { page: string; url: string; proxy: ProxyItem }[] = [];
 
     for (const page of pages) {
-      const url = pageUrl(args.baseUrl, page);
+      const url = page;
       for (const group of proxyGroups(proxies, args.shuffleProxies)) {
         for (let index = 0; index < group.length; index++) {
           const proxy = group[index];
