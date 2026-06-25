@@ -509,11 +509,9 @@ function metricBatchColumn(row: MetricRow): MetricTimeColumn {
 
 function batchTimeRange(start: number, end: number) {
   if (start === Number.MAX_SAFE_INTEGER) return "No time";
-  const startDate = new Date(start);
-  const endDate = new Date(end);
-  const startLabel = startDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const endLabel = endDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return `${startLabel} - ${endLabel} ${startDate.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+  const middleDate = new Date(start + (end - start) / 2);
+  const middleLabel = middleDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `${middleLabel} ${middleDate.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 
 function renderMetricTimeHeader(columns: MetricTimeColumn[]) {

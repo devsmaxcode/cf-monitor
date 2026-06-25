@@ -361,7 +361,7 @@ function monitorArgs(config: Config) {
     "--rounds",
     "1",
     "--miss-recheck-delay",
-    String(config.missIntervalSeconds),
+    "0",
     "--timeout",
     String(config.timeout),
     "--delay",
@@ -494,12 +494,26 @@ async function buildMetrics(config: Config) {
 }
 
 function metricTimeColumns(rows: MetricRow[]) {
-  const columns = new Map<string, MetricTimeColumn>();
+  const columns = new Map<string, MetricTimeColumn & { start: number; end: number }>();
   for (const row of rows) {
-    const column = metricTimeColumn(row.timestamp_utc || "");
-    if (!columns.has(column.key)) columns.set(column.key, column);
+    const column = metricBatchColumn(row);
+    const time = Date.parse(row.timestamp_utc || "");
+    const point = Number.isNaN(time) ? column.sort : time;
+    const existing = columns.get(column.key);
+
+    if (!existing) {
+      columns.set(column.key, { ...column, start: point, end: point });
+      continue;
+    }
+
+    existing.start = Math.min(existing.start, point);
+    existing.end = Math.max(existing.end, point);
+    existing.sort = existing.start;
+    existing.meta = batchTimeRange(existing.start, existing.end);
   }
-  return [...columns.values()].sort((a, b) => a.sort - b.sort);
+  return [...columns.values()]
+    .sort((a, b) => a.sort - b.sort)
+    .map(({ start, end, ...column }) => column);
 }
 
 function metricTimeColumn(value: string): MetricTimeColumn {
@@ -527,6 +541,19 @@ function metricTimeColumn(value: string): MetricTimeColumn {
       date.getHours() * 100 +
       date.getMinutes(),
   };
+}
+
+function metricBatchColumn(row: MetricRow): MetricTimeColumn {
+  const column = metricTimeColumn(row.timestamp_utc || "");
+  if (!row.round) return column;
+  return { ...column, key: `batch-${row.round}`, label: `Batch ${row.round}` };
+}
+
+function batchTimeRange(start: number, end: number) {
+  if (start === Number.MAX_SAFE_INTEGER) return "No time";
+  const middleDate = new Date(start + (end - start) / 2);
+  const middleLabel = middleDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `${middleLabel}, ${middleDate.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 
 function isMissLike(row: MetricRow) {

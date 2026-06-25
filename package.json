@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "dev": "portless run bun run src/server.ts",
+    "build": "bun build src/server.ts --target bun --outdir dist --root .",
     "monitor": "bun run scripts/cloudflare_cache_monitor_bun.ts"
   },
   "devDependencies": {
