@@ -680,7 +680,7 @@ function average(values: number[]) {
 }
 
 const server = Bun.serve({
-  port: Number(process.env.PORT || 6789),
+  port: Number(process.env.PORT || 3033),
   routes: {
     "/": index,
     "/api/config": {
