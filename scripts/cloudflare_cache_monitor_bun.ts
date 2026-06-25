@@ -1,7 +1,13 @@
 #!/usr/bin/env bun
 
 import { readFile } from "node:fs/promises";
-import { appendMetricRows, DEFAULT_METRICS_DB, normalizeMetricsOutput } from "../src/metrics-db";
+import {
+  appendMetricRows,
+  createMetricRound,
+  DEFAULT_METRICS_DB,
+  finalizeMetricRound,
+  normalizeMetricsOutput,
+} from "../src/metrics-db";
 
 const PROXIFLY =
   "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/all/data.json";
@@ -48,6 +54,8 @@ const COUNTRY_CODES_BY_NAME = Object.fromEntries(
 );
 type ProxyItem = { url: string | null; country: string };
 type Metrics = Record<string, string>;
+type RecheckTarget = { page: string; url: string; proxy: ProxyItem };
+type CheckResult = { rows: Metrics[]; rechecks: RecheckTarget[] };
 
 function parseArgs() {
   const args: Record<string, string | number | boolean> = {
@@ -57,11 +65,15 @@ function parseArgs() {
     proxyCountries: COUNTRIES.map((country) => COUNTRY_NAMES[country]).join(","),
     maxProxiesPerCountry: 25,
     output: DEFAULT_METRICS_DB,
+    roundId: 0,
+    roundReason: "cli",
     rounds: 1,
     interval: 300,
     missRecheckDelay: 0,
     timeout: 5,
     delay: 0,
+    pageConcurrency: 4,
+    countryConcurrency: 6,
     noDirect: false,
     shuffleProxies: false,
     userAgent: "UmmahOneCacheMonitor/1.0 (+https://ummah.one)",
@@ -76,11 +88,15 @@ function parseArgs() {
     "--proxy-countries": "proxyCountries",
     "--max-proxies-per-country": "maxProxiesPerCountry",
     "--output": "output",
+    "--round-id": "roundId",
+    "--round-reason": "roundReason",
     "--rounds": "rounds",
     "--interval": "interval",
     "--miss-recheck-delay": "missRecheckDelay",
     "--timeout": "timeout",
     "--delay": "delay",
+    "--page-concurrency": "pageConcurrency",
+    "--country-concurrency": "countryConcurrency",
     "--user-agent": "userAgent",
   };
 
@@ -95,7 +111,17 @@ function parseArgs() {
       const key = map[arg];
       const value = Bun.argv[++i];
       if (!value || value.startsWith("--")) usage(1);
-      args[key] = ["maxProxiesPerCountry", "rounds", "interval", "missRecheckDelay", "timeout", "delay"].includes(key)
+      args[key] = [
+        "maxProxiesPerCountry",
+        "roundId",
+        "rounds",
+        "interval",
+        "missRecheckDelay",
+        "timeout",
+        "delay",
+        "pageConcurrency",
+        "countryConcurrency",
+      ].includes(key)
         ? Number(value)
         : value;
     } else {
@@ -105,6 +131,13 @@ function parseArgs() {
   }
 
   args.output = normalizeMetricsOutput(String(args.output));
+  args.pageConcurrency = positiveInteger(args.pageConcurrency, 4);
+  args.countryConcurrency = positiveInteger(args.countryConcurrency, 6);
+  args.roundId = nonNegativeInteger(args.roundId, 0);
+  if (Number(args.roundId) > 0 && Number(args.rounds) !== 1) {
+    console.error("--round-id can only be used with --rounds 1");
+    usage(1);
+  }
 
   return args as {
     pages?: string;
@@ -115,15 +148,29 @@ function parseArgs() {
     proxyCountries: string;
     maxProxiesPerCountry: number;
     output: string;
+    roundId: number;
+    roundReason: string;
     rounds: number;
     interval: number;
     missRecheckDelay: number;
     timeout: number;
     delay: number;
+    pageConcurrency: number;
+    countryConcurrency: number;
     noDirect: boolean;
     shuffleProxies: boolean;
     userAgent: string;
   };
+}
+
+function positiveInteger(value: unknown, fallback: number) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function nonNegativeInteger(value: unknown, fallback: number) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
 function usage(code: number): never {
@@ -136,7 +183,11 @@ Options:
   --rounds 1              0 = forever
   --timeout 5
   --miss-recheck-delay 0  seconds to wait before rechecking MISS-like samples
+  --page-concurrency 4    target pages checked in parallel
+  --country-concurrency 6 proxy country groups checked in parallel per page
   --output storage/cloudflare-cache-metrics.sqlite
+  --round-id 123          existing cache_rounds id, for dashboard-managed runs
+  --round-reason cli      stored when the script creates its own round
   --no-direct
   --no-proxy-source
   --no-clarketm-source
@@ -316,29 +367,34 @@ async function loadClarketm(
 async function loadProxies(args: ReturnType<typeof parseArgs>) {
   const countryCodes = countries(args.proxyCountries);
   const proxies: ProxyItem[] = args.noDirect ? [] : [{ url: null, country: "direct" }];
+  const sourceJobs: Promise<ProxyItem[]>[] = [];
 
   if (args.proxySource) {
-    try {
-      proxies.push(...(await loadProxifly(args.proxySource, countryCodes, args.maxProxiesPerCountry, args.timeout)));
-    } catch (error) {
-      console.error(`proxifly failed: ${errorName(error)}`);
-    }
+    sourceJobs.push(
+      loadProxifly(args.proxySource, countryCodes, args.maxProxiesPerCountry, args.timeout).catch((error) => {
+        console.error(`proxifly failed: ${errorName(error)}`);
+        return [];
+      }),
+    );
   }
 
   if (args.clarketmSource) {
-    try {
-      proxies.push(
-        ...(await loadClarketm(
-          args.clarketmSource,
-          args.clarketmStatusSource,
-          countryCodes,
-          args.maxProxiesPerCountry,
-          args.timeout,
-        )),
-      );
-    } catch (error) {
-      console.error(`clarketm failed: ${errorName(error)}`);
-    }
+    sourceJobs.push(
+      loadClarketm(
+        args.clarketmSource,
+        args.clarketmStatusSource,
+        countryCodes,
+        args.maxProxiesPerCountry,
+        args.timeout,
+      ).catch((error) => {
+        console.error(`clarketm failed: ${errorName(error)}`);
+        return [];
+      }),
+    );
+  }
+
+  for (const sourceProxies of await Promise.all(sourceJobs)) {
+    proxies.push(...sourceProxies);
   }
 
   for (const line of await readList(args.proxies)) {
@@ -493,8 +549,42 @@ function logRow(row: Metrics, attempt: string) {
   );
 }
 
+function logPageRequest(roundId: number, page: string) {
+  console.log(`requesting round=${roundId} page=${page}`);
+}
+
 async function appendRows(output: string, rows: Metrics[]) {
   await appendMetricRows(output, rows);
+}
+
+async function openRound(args: ReturnType<typeof parseArgs>, pages: string[], sequence: number) {
+  if (args.roundId > 0) return args.roundId;
+
+  const round = await createMetricRound(args.output, {
+    reason: args.roundReason || `cli-${sequence}`,
+    pageCount: pages.length,
+    proxyCountryCount: countries(args.proxyCountries).length + (args.noDirect ? 0 : 1),
+    configJson: roundConfigJson(args, pages),
+  });
+  console.log(`opened database round ${round.id}`);
+  return round.id;
+}
+
+function roundConfigJson(args: ReturnType<typeof parseArgs>, pages: string[]) {
+  return JSON.stringify({
+    pages,
+    proxyCountries: args.proxyCountries,
+    maxProxiesPerCountry: args.maxProxiesPerCountry,
+    timeout: args.timeout,
+    delay: args.delay,
+    pageConcurrency: args.pageConcurrency,
+    countryConcurrency: args.countryConcurrency,
+    noDirect: args.noDirect,
+    noProxySource: !args.proxySource,
+    noClarketmSource: !args.clarketmSource,
+    shuffleProxies: args.shuffleProxies,
+    userAgent: args.userAgent,
+  });
 }
 
 function proxyLabel(proxy: string | null) {
@@ -510,72 +600,148 @@ function errorName(error: unknown) {
 
 const sleep = (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
+async function mapLimit<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function checkProxyGroup(
+  page: string,
+  url: string,
+  group: ProxyItem[],
+  roundId: number,
+  args: ReturnType<typeof parseArgs>,
+): Promise<CheckResult> {
+  const rows: Metrics[] = [];
+  const rechecks: RecheckTarget[] = [];
+
+  for (let index = 0; index < group.length; index++) {
+    const proxy = group[index];
+    const metrics = await request(url, proxy.url, args.timeout, args.userAgent);
+    const row = {
+      round_id: String(roundId),
+      timestamp_utc: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"),
+      round: String(roundId),
+      page,
+      url,
+      proxy: proxyLabel(proxy.url),
+      proxy_country: countryName(proxy.country),
+      ...metrics,
+    };
+    rows.push(row);
+
+    logRow(row, `${index + 1}/${group.length}`);
+
+    if (args.delay) await sleep(args.delay);
+    if (useful(metrics)) {
+      if (args.missRecheckDelay > 0 && isMissLike(metrics)) {
+        rechecks.push({ page, url, proxy });
+      }
+      break;
+    }
+  }
+
+  return { rows, rechecks };
+}
+
+async function checkPage(
+  page: string,
+  proxies: ProxyItem[],
+  roundId: number,
+  args: ReturnType<typeof parseArgs>,
+): Promise<CheckResult> {
+  logPageRequest(roundId, page);
+  const url = page;
+  const groups = proxyGroups(proxies, args.shuffleProxies);
+  const groupResults = await mapLimit(groups, args.countryConcurrency, (group) =>
+    checkProxyGroup(page, url, group, roundId, args),
+  );
+
+  return {
+    rows: groupResults.flatMap((result) => result.rows),
+    rechecks: groupResults.flatMap((result) => result.rechecks),
+  };
+}
+
 async function main() {
   const args = parseArgs();
   const pageList = await readList(args.pages);
   const pages = (pageList.length ? pageList : DEFAULT_PAGES).map(targetUrl);
 
   for (let round = 1; args.rounds === 0 || round <= args.rounds; round++) {
-    const proxies = await loadProxies(args);
-    const rows: Metrics[] = [];
-    const rechecks: { page: string; url: string; proxy: ProxyItem }[] = [];
+    let roundId = 0;
+    let rowCount = 0;
+    let recheckCount = 0;
+    try {
+      roundId = await openRound(args, pages, round);
+      const proxies = await loadProxies(args);
+      const rows: Metrics[] = [];
+      const rechecks: RecheckTarget[] = [];
+      const pageResults = await mapLimit(pages, args.pageConcurrency, (page) => checkPage(page, proxies, roundId, args));
 
-    for (const page of pages) {
-      const url = page;
-      for (const group of proxyGroups(proxies, args.shuffleProxies)) {
-        for (let index = 0; index < group.length; index++) {
-          const proxy = group[index];
-          const metrics = await request(url, proxy.url, args.timeout, args.userAgent);
+      for (const result of pageResults) {
+        rows.push(...result.rows);
+        rechecks.push(...result.rechecks);
+      }
+
+      await appendRows(args.output, rows);
+      rowCount += rows.length;
+      console.log(`saved ${rows.length} rows for database round ${roundId} -> ${args.output}`);
+
+      if (rechecks.length && args.missRecheckDelay > 0) {
+        console.log(`waiting ${args.missRecheckDelay}s to recheck ${rechecks.length} MISS-like samples`);
+        await sleep(args.missRecheckDelay);
+
+        const recheckRows: Metrics[] = [];
+        for (const target of rechecks) {
+          const metrics = await request(target.url, target.proxy.url, args.timeout, args.userAgent);
           const row = {
+            round_id: String(roundId),
             timestamp_utc: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"),
-            round: String(round),
-            page,
-            url,
-            proxy: proxyLabel(proxy.url),
-            proxy_country: countryName(proxy.country),
+            round: `${roundId}-recheck`,
+            page: target.page,
+            url: target.url,
+            proxy: proxyLabel(target.proxy.url),
+            proxy_country: countryName(target.proxy.country),
             ...metrics,
           };
-          rows.push(row);
-
-          logRow(row, `${index + 1}/${group.length}`);
-
+          recheckRows.push(row);
+          logRow(row, "rechk");
           if (args.delay) await sleep(args.delay);
-          if (useful(metrics)) {
-            if (args.missRecheckDelay > 0 && isMissLike(metrics)) {
-              rechecks.push({ page, url, proxy });
-            }
-            break;
-          }
         }
-      }
-    }
 
-    await appendRows(args.output, rows);
-    console.log(`saved ${rows.length} rows -> ${args.output}`);
-
-    if (rechecks.length && args.missRecheckDelay > 0) {
-      console.log(`waiting ${args.missRecheckDelay}s to recheck ${rechecks.length} MISS-like samples`);
-      await sleep(args.missRecheckDelay);
-
-      const recheckRows: Metrics[] = [];
-      for (const target of rechecks) {
-        const metrics = await request(target.url, target.proxy.url, args.timeout, args.userAgent);
-        const row = {
-          timestamp_utc: new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00"),
-          round: `${round}-recheck`,
-          page: target.page,
-          url: target.url,
-          proxy: proxyLabel(target.proxy.url),
-          proxy_country: countryName(target.proxy.country),
-          ...metrics,
-        };
-        recheckRows.push(row);
-        logRow(row, "rechk");
-        if (args.delay) await sleep(args.delay);
+        await appendRows(args.output, recheckRows);
+        rowCount += recheckRows.length;
+        recheckCount = recheckRows.length;
+        console.log(`saved ${recheckRows.length} recheck rows for database round ${roundId} -> ${args.output}`);
       }
 
-      await appendRows(args.output, recheckRows);
-      console.log(`saved ${recheckRows.length} recheck rows -> ${args.output}`);
+      await finalizeMetricRound(args.output, roundId, {
+        status: "completed",
+        totalRows: rowCount,
+        recheckRows: recheckCount,
+      });
+      console.log(`completed database round ${roundId}`);
+    } catch (error) {
+      if (roundId) {
+        await finalizeMetricRound(args.output, roundId, {
+          status: "failed",
+          totalRows: rowCount,
+          recheckRows: recheckCount,
+          error: errorName(error),
+        }).catch((finalizeError) => console.error(`round finalize failed: ${errorName(finalizeError)}`));
+      }
+      throw error;
     }
 
     if (args.rounds === 0 || round < args.rounds) await sleep(args.interval);

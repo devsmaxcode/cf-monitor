@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run src/server.ts",
-    "dev": "portless run bun run src/server.ts",
+    "start": "bun run src/server.ts --port 6789",
+    "dev": "bun run src/server.ts --port 6789",
     "build": "bun build src/server.ts --target bun --outdir dist --root .",
     "monitor": "bun run scripts/cloudflare_cache_monitor_bun.ts"
   },

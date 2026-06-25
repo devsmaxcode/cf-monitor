@@ -1,3 +1,4 @@
 node_modules/
 storage/*.csv
 scripts/storage/*.csv
+dist

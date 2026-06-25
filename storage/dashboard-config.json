@@ -20,7 +20,7 @@
   "maxProxiesPerCountry": 8,
   "timeout": 5,
   "delay": 0,
-  "hitIntervalSeconds": 1800,
+  "hitIntervalSeconds": 6000,
   "missIntervalSeconds": 120,
   "noDirect": false,
   "noProxySource": false,

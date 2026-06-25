@@ -44,19 +44,6 @@ export function icon(name: IconName) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
 }
 
-export function statCard(label: string, value: string, meta: string, iconName: IconName) {
-  return `
-    <article class="stat">
-      <span class="stat-icon" aria-hidden="true">${icon(iconName)}</span>
-      <div>
-        <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(value)}</strong>
-        <small>${escapeHtml(meta)}</small>
-      </div>
-    </article>
-  `;
-}
-
 export function checkbox(name: string, label: string, checked: boolean) {
   return `
     <label class="check">

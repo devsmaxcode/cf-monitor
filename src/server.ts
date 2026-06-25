@@ -3,9 +3,12 @@ import { dirname, join } from "node:path";
 import { Cron } from "croner";
 import index from "../public/index.html";
 import {
+  createMetricRound,
   DEFAULT_METRICS_DB,
+  finalizeMetricRound,
   normalizeMetricsOutput,
   readMetricRows,
+  readMetricRounds,
   type MetricRow,
 } from "./metrics-db";
 
@@ -36,6 +39,7 @@ type MonitorState = {
   running: boolean;
   busy: boolean;
   round: number;
+  crawl: CrawlProgress | null;
   startedAt: string | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
@@ -43,6 +47,13 @@ type MonitorState = {
   lastReason: string | null;
   lastError: string | null;
   logs: string[];
+};
+
+type CrawlProgress = {
+  round: number;
+  totalUrls: number;
+  requestedUrls: number;
+  activeUrl: string | null;
 };
 
 const root = join(import.meta.dir, "..");
@@ -88,6 +99,7 @@ const state: MonitorState = {
   running: false,
   busy: false,
   round: 0,
+  crawl: null,
   startedAt: null,
   lastRunAt: null,
   nextRunAt: null,
@@ -100,6 +112,7 @@ const state: MonitorState = {
 let scheduledJob: Cron | null = null;
 let activeMonitorProcess: ReturnType<typeof Bun.spawn> | null = null;
 let stopRequested = false;
+let requestedCrawlPages = new Set<string>();
 let broadcastTimer: Timer | null = null;
 let broadcastInFlight = false;
 let broadcastAgain = false;
@@ -202,7 +215,7 @@ function pushLog(line: string) {
 }
 
 function snapshotState(): MonitorState {
-  return { ...state, logs: [...state.logs] };
+  return { ...state, crawl: state.crawl ? { ...state.crawl } : null, logs: [...state.logs] };
 }
 
 async function buildRuntimePayload() {
@@ -269,22 +282,44 @@ async function pipeProcessOutput(stream: ReadableStream<Uint8Array> | null, labe
       buffer = lines.pop() || "";
 
       for (const line of lines) {
-        if (line.trim()) pushLog(label ? `${label}${line}` : line);
+        if (line.trim()) {
+          recordCrawlProgress(line);
+          pushLog(label ? `${label}${line}` : line);
+        }
       }
     }
 
     buffer += decoder.decode();
-    if (buffer.trim()) pushLog(label ? `${label}${buffer}` : buffer);
+    if (buffer.trim()) {
+      recordCrawlProgress(buffer);
+      pushLog(label ? `${label}${buffer}` : buffer);
+    }
   } finally {
     reader.releaseLock();
   }
+}
+
+function recordCrawlProgress(line: string) {
+  const match = line.match(/^requesting\s+round=(\d+)\s+page=(.+)$/);
+  if (!match || !state.crawl) return;
+
+  const round = Number(match[1]);
+  const page = match[2].trim();
+  if (!page || !state.busy || round !== state.round) return;
+
+  requestedCrawlPages.add(page);
+  state.crawl = {
+    ...state.crawl,
+    activeUrl: page,
+    requestedUrls: Math.min(state.crawl.totalUrls, requestedCrawlPages.size),
+  };
 }
 
 async function runMonitorRound(reason: string) {
   if (state.busy) return { skipped: true, reason: "monitor is already running" };
 
   state.busy = true;
-  state.round += 1;
+  state.crawl = null;
   state.lastReason = reason;
   state.lastError = null;
   state.nextRunAt = null;
@@ -292,21 +327,49 @@ async function runMonitorRound(reason: string) {
 
   let config: Config | null = null;
   let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let roundId = 0;
   stopRequested = false;
 
   try {
     config = await readConfig();
+    requestedCrawlPages = new Set<string>();
+    state.crawl = {
+      round: 0,
+      totalUrls: config.pages.length,
+      requestedUrls: 0,
+      activeUrl: null,
+    };
     await ensureRunFiles(config);
+    const round = await createMetricRound(
+      config.output,
+      {
+        reason,
+        pageCount: config.pages.length,
+        proxyCountryCount: configuredProxyLocationCount(config),
+        configJson: JSON.stringify(config),
+      },
+      root,
+    );
+    roundId = round.id;
+    state.round = roundId;
+    state.crawl = { ...state.crawl, round: roundId };
+    queueRuntimeBroadcast();
 
     if (stopRequested) {
-      pushLog(`[${new Date().toLocaleString()}] round ${state.round} stopped before collector start`);
+      pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped before collector start`);
+      await finalizeMetricRound(
+        config.output,
+        roundId,
+        { status: "stopped", error: "stopped before collector start" },
+        root,
+      );
       return { skipped: false };
     }
 
-    const args = monitorArgs(config);
+    const args = monitorArgs(config, roundId, reason);
     const started = new Date();
     state.lastRunAt = started.toISOString();
-    pushLog(`[${started.toLocaleString()}] round ${state.round} started (${reason})`);
+    pushLog(`[${started.toLocaleString()}] round ${roundId} started (${reason})`);
     pushLog(`collector args: ${args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(" ")}`);
 
     proc = Bun.spawn([process.execPath, ...args], {
@@ -326,18 +389,26 @@ async function runMonitorRound(reason: string) {
 
     if (exitCode !== 0) {
       if (stopRequested) {
-        pushLog(`[${new Date().toLocaleString()}] round ${state.round} stopped`);
+        pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped`);
+        await finalizeMetricRound(config.output, roundId, { status: "stopped", error: "stopped by user" }, root);
       } else {
         state.lastError = `collector exited with code ${exitCode}`;
         pushLog(state.lastError);
+        await finalizeMetricRound(config.output, roundId, { status: "failed", error: state.lastError }, root);
       }
     } else {
-      pushLog(`[${new Date().toLocaleString()}] round ${state.round} finished`);
+      await finalizeMetricRound(config.output, roundId, { status: "completed" }, root);
+      pushLog(`[${new Date().toLocaleString()}] round ${roundId} finished`);
     }
   } catch (error) {
     state.lastExitCode = 1;
     state.lastError = errorMessage(error);
     pushLog(state.lastError);
+    if (config && roundId) {
+      await finalizeMetricRound(config.output, roundId, { status: "failed", error: state.lastError }, root).catch(
+        (finalizeError) => pushLog(`round finalize failed: ${errorMessage(finalizeError)}`),
+      );
+    }
   } finally {
     if (activeMonitorProcess === proc) activeMonitorProcess = null;
     stopRequested = false;
@@ -345,11 +416,19 @@ async function runMonitorRound(reason: string) {
     queueRuntimeBroadcast();
   }
 
-  if (state.running && config) void scheduleNext(config);
+  if (state.running) void scheduleNextFromSavedConfig();
   return { skipped: false };
 }
 
-function monitorArgs(config: Config) {
+async function scheduleNextFromSavedConfig() {
+  try {
+    await scheduleNext(await readConfig());
+  } catch (error) {
+    pushLog(`schedule config read failed: ${errorMessage(error)}`);
+  }
+}
+
+function monitorArgs(config: Config, roundId: number, reason: string) {
   const args = [
     join(root, "scripts", "cloudflare_cache_monitor_bun.ts"),
     "--pages",
@@ -358,6 +437,10 @@ function monitorArgs(config: Config) {
     proxiesPath,
     "--output",
     config.output,
+    "--round-id",
+    String(roundId),
+    "--round-reason",
+    reason,
     "--rounds",
     "1",
     "--miss-recheck-delay",
@@ -379,6 +462,14 @@ function monitorArgs(config: Config) {
   if (config.noClarketmSource) args.push("--no-clarketm-source");
   if (config.shuffleProxies) args.push("--shuffle-proxies");
   return args;
+}
+
+function configuredProxyLocationCount(config: Config) {
+  const countries = config.proxyCountries
+    .split(",")
+    .map((country) => country.trim())
+    .filter(Boolean).length;
+  return countries + (config.noDirect ? 0 : 1);
 }
 
 async function startMonitor() {
@@ -438,6 +529,7 @@ async function scheduleNext(config: Config) {
 
 async function buildMetrics(config: Config) {
   const rows = await readMetricRows(config.output, root);
+  const rounds = await readMetricRounds(config.output, root);
   const timeColumns = metricTimeColumns(rows);
   const latest = new Map<string, MetricRow>();
 
@@ -480,6 +572,7 @@ async function buildMetrics(config: Config) {
   }));
 
   const summary = {
+    totalRounds: rounds.length,
     totalRows: rows.length,
     latestCells: latestRows.length,
     latestHits: latestRows.filter((row) => row.cf_cache_status === "HIT").length,
@@ -490,7 +583,7 @@ async function buildMetrics(config: Config) {
     lastTimestamp: rows.at(-1)?.timestamp_utc || null,
   };
 
-  return { rows, latestRows, countries, pages, pageStats, matrix, timeColumns, summary };
+  return { rows, rounds, latestRows, countries, pages, pageStats, matrix, timeColumns, summary };
 }
 
 function metricTimeColumns(rows: MetricRow[]) {
@@ -545,8 +638,9 @@ function metricTimeColumn(value: string): MetricTimeColumn {
 
 function metricBatchColumn(row: MetricRow): MetricTimeColumn {
   const column = metricTimeColumn(row.timestamp_utc || "");
-  if (!row.round) return column;
-  return { ...column, key: `batch-${row.round}`, label: `Batch ${row.round}` };
+  const round = row.round || row.round_id;
+  if (!round) return column;
+  return { ...column, key: `batch-${round}`, label: `Batch ${round}` };
 }
 
 function batchTimeRange(start: number, end: number) {
@@ -586,7 +680,7 @@ function average(values: number[]) {
 }
 
 const server = Bun.serve({
-  port: Number(process.env.PORT || 3000),
+  port: Number(process.env.PORT || 6789),
   routes: {
     "/": index,
     "/api/config": {
@@ -597,6 +691,7 @@ const server = Bun.serve({
         try {
           const config = sanitizeConfig(await req.json());
           await saveConfig(config);
+          if (state.running && !state.busy) void scheduleNext(config);
           queueRuntimeBroadcast();
           return json(config);
         } catch (error) {

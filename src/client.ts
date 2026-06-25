@@ -1,4 +1,4 @@
-import { checkbox, emptyTableRow, escapeAttr, escapeHtml, filterOptions, icon, statCard } from "./components";
+import { checkbox, emptyTableRow, escapeAttr, escapeHtml, filterOptions, icon } from "./components";
 
 type Config = {
   pages: string[];
@@ -36,6 +36,22 @@ type MetricTimeColumn = {
   sort: number;
 };
 
+type MetricRound = {
+  id: number;
+  status: "running" | "completed" | "failed" | "stopped";
+  reason: string;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  total_rows: number;
+  recheck_rows: number;
+  page_count: number;
+  proxy_country_count: number;
+  config_json: string;
+  error: string;
+  created_at: string;
+};
+
 type MetricTimeGroup = {
   key: string;
   page: string;
@@ -45,7 +61,19 @@ type MetricTimeGroup = {
   cells: Map<string, MetricRow>;
 };
 
+type MetricRowsIndex = {
+  countries: string[];
+  pages: string[];
+  rows: {
+    row: MetricRow;
+    searchText: string;
+    status: string;
+  }[];
+  statuses: string[];
+};
+
 type MetricsPayload = {
+  rounds: MetricRound[];
   latestRows: MetricRow[];
   pageStats: {
     page: string;
@@ -57,6 +85,7 @@ type MetricsPayload = {
     total: number;
   }[];
   summary: {
+    totalRounds: number;
     totalRows: number;
     latestCells: number;
     latestHits: number;
@@ -70,14 +99,15 @@ type MetricsPayload = {
   rows: MetricRow[];
 };
 
-const MATRIX_URL_COL_WIDTH = 300;
-const MATRIX_COUNTRY_COL_WIDTH = 130;
-const MATRIX_TIME_COL_WIDTH = 156;
+const MATRIX_URL_COL_WIDTH = 260;
+const MATRIX_COUNTRY_COL_WIDTH = 150;
+const MATRIX_TIME_COL_WIDTH = 122;
 
 type Status = {
   running: boolean;
   busy: boolean;
   round: number;
+  crawl: CrawlProgress | null;
   startedAt: string | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
@@ -85,6 +115,13 @@ type Status = {
   lastReason: string | null;
   lastError: string | null;
   logs: string[];
+};
+
+type CrawlProgress = {
+  round: number;
+  totalUrls: number;
+  requestedUrls: number;
+  activeUrl: string | null;
 };
 
 type RuntimeMessage = {
@@ -101,7 +138,8 @@ let config: Config;
 let metrics: MetricsPayload;
 let statusState: Status;
 let proxyText = "";
-let activeTab: "metrics" | "config" | "proxies" = "metrics";
+let activeTab: "metrics" | "rounds" | "config" | "proxies" | "logs" | "age" = "metrics";
+let selectedRoundId: number | null = null;
 let formDirty = false;
 let metricFilters = {
   query: "",
@@ -116,6 +154,11 @@ let metricPagination = {
 let liveSocket: WebSocket | null = null;
 let reconnectTimer: number | null = null;
 let fallbackRefreshTimer: number | null = null;
+let nextRunTimer: number | null = null;
+let metricFilterTimer: number | null = null;
+let metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
+let metricRowsCache: { source: MetricRow[]; index: MetricRowsIndex } | null = null;
+let dueRefreshForNextRun: string | null = null;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -198,7 +241,10 @@ function stopFallbackRefresh() {
 function applyRuntime(nextMetrics: MetricsPayload, nextStatus: Status) {
   metrics = nextMetrics;
   statusState = nextStatus;
+  metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
+  metricRowsCache = null;
   updateRuntimeView();
+  syncNextRunTicker();
 }
 
 function topAgeRows() {
@@ -222,38 +268,41 @@ function render() {
         <span class="brand-mark" aria-hidden="true">${icon("cloud")}</span>
         <span>Cloudflare Cache Monitor</span>
       </div>
-    </header>
-
-    <section class="hero" data-region="hero">
-      <div class="domain-line">
-        <h1>${escapeHtml(targetLabel(config.pages))}</h1>
-        <span class="state-dot ${statusState.busy || statusState.running ? "on" : ""}" data-status-dot aria-hidden="true"></span>
-        <span class="state-text" data-status-label>${escapeHtml(runtimeStatusLabel())}</span>
+      <div class="appbar-controls">
+        <span class="state-chip ${statusState.busy || statusState.running ? "on" : ""}" data-status-chip>
+          <span class="state-dot" data-status-dot aria-hidden="true"></span>
+          <span data-status-label>${escapeHtml(runtimeStatusLabel())}</span>
+        </span>
+        <div data-crawl-progress>${renderCrawlProgress()}</div>
+        <div data-next-run-countdown>${renderNextRunCountdown()}</div>
+        <div class="actions" data-actions>${renderActionButtons()}</div>
       </div>
-      <div class="actions" data-actions>${renderActionButtons()}</div>
-    </section>
-
-    <section class="status-strip" data-region="status-strip">
-      ${renderStatusCards()}
-    </section>
+    </header>
 
     <nav class="tabs">
       <button class="${activeTab === "metrics" ? "active" : ""}" data-tab="metrics">Metrics</button>
+      <button class="${activeTab === "rounds" ? "active" : ""}" data-tab="rounds">Rounds</button>
+      <button class="${activeTab === "age" ? "active" : ""}" data-tab="age">Age</button>
       <button class="${activeTab === "config" ? "active" : ""}" data-tab="config">Configuration</button>
       <button class="${activeTab === "proxies" ? "active" : ""}" data-tab="proxies">Proxies</button>
+      <button class="${activeTab === "logs" ? "active" : ""}" data-tab="logs">Logs</button>
     </nav>
 
     ${activeTab === "metrics" ? renderMetrics() : ""}
+    ${activeTab === "rounds" ? renderRounds() : ""}
+    ${activeTab === "age" ? renderAge() : ""}
     ${activeTab === "config" ? renderConfig() : ""}
     ${activeTab === "proxies" ? renderProxies() : ""}
+    ${activeTab === "logs" ? renderLogs() : ""}
   `;
 
   wireEvents();
+  syncNextRunTicker();
 }
 
 function renderMetrics() {
-  const samples = sampleMetricRows();
-  const rows = filteredMetricRows(samples);
+  const index = metricRowsIndex();
+  const rows = filteredMetricRows();
   const timeColumns = metricTimeColumns(rows);
   const groups = metricTimeGroups(rows, timeColumns);
   const pagination = paginationInfo(groups.length);
@@ -261,10 +310,6 @@ function renderMetrics() {
 
   return `
     <section class="samples-panel">
-      <div class="section-head">
-        <h2><span class="section-icon" aria-hidden="true">${icon("grid")}</span>Cache Samples</h2>
-        <span data-filter-count>${rows.length} of ${samples.length} fetched</span>
-      </div>
       <div class="table-filters">
         <label>
           Search
@@ -274,25 +319,25 @@ function renderMetrics() {
           Page
           <select data-filter="page">
             <option value="">All pages</option>
-            ${filterOptions(uniqueValues(samples.map((row) => row.page)), metricFilters.page)}
+            ${filterOptions(index.pages, metricFilters.page)}
           </select>
         </label>
         <label>
           Country
           <select data-filter="country">
             <option value="">All countries</option>
-            ${filterOptions(uniqueValues(samples.map((row) => row.proxy_country)), metricFilters.country, countryName)}
+            ${filterOptions(index.countries, metricFilters.country, countryName)}
           </select>
         </label>
         <label>
           Status
           <select data-filter="status">
             <option value="">All statuses</option>
-            ${filterOptions(uniqueValues(samples.map(cacheStatus)), metricFilters.status)}
+            ${filterOptions(index.statuses, metricFilters.status)}
           </select>
         </label>
       </div>
-      <div class="table-scroll">
+      <div>
         <table class="sample-table metric-matrix" data-metric-table style="${metricMatrixStyle(timeColumns)}">
           ${renderMetricColgroup(timeColumns)}
           <thead data-filter-head>
@@ -307,46 +352,268 @@ function renderMetrics() {
         ${renderPaginationControls(pagination)}
       </div>
     </section>
+  `;
+}
 
-    <section class="metrics-bottom">
-      <aside class="side-panel">
-        <div class="section-head">
-          <h2><span class="section-icon" aria-hidden="true">${icon("clock")}</span>Cache Age</h2>
-          <span data-age-timestamp>${metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : ""}</span>
-        </div>
-        <div class="age-list" data-age-list>
-          ${topAgeRows().map(renderAgeRow).join("")}
-        </div>
-      </aside>
+function renderAge() {
+  return `
+    <section class="side-panel cache-age-panel">
+      <div class="section-head">
+        <h2><span class="section-icon" aria-hidden="true">${icon("clock")}</span>Cache Age</h2>
+        <span data-age-timestamp>${metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : ""}</span>
+      </div>
+      <div class="age-list" data-age-list>
+        ${topAgeRows().map(renderAgeRow).join("") || '<div class="empty-state">No cache age data yet.</div>'}
+      </div>
+    </section>
+  `;
+}
 
-      <section class="logs-panel">
-        <div class="section-head">
-          <h2>Collector Log</h2>
-          <span data-log-round>round ${statusState.round}</span>
+function renderRounds() {
+  return `<section class="rounds-panel" data-rounds-view>${renderRoundsContent()}</section>`;
+}
+
+function renderRoundsContent() {
+  const stats = roundStats();
+  const selected = selectedRound();
+
+  return `
+    <div class="rounds-hero">
+      <div>
+        <span class="section-icon" aria-hidden="true">${icon("grid")}</span>
+        <div>
+          <h2>Round Stats</h2>
+          <p>${escapeHtml(roundsSubtitle(stats))}</p>
         </div>
-        <pre data-log-output>${escapeHtml(statusState.logs.slice(-28).join("\n") || "No collector output yet.")}</pre>
-      </section>
+      </div>
+      <div class="rounds-live ${statusState.busy ? "active" : statusState.running ? "armed" : ""}">
+        <span aria-hidden="true"></span>
+        <strong>${escapeHtml(roundsLiveLabel())}</strong>
+      </div>
+    </div>
+
+    <div class="rounds-body">
+      <div class="rounds-list-wrap">
+        <div class="rounds-list-head">
+          <h3>All Rounds</h3>
+          <span>${metrics.rounds.length ? `${metrics.rounds.length} retained` : "Empty"}</span>
+        </div>
+        <div class="rounds-list" data-round-list>
+          ${metrics.rounds.length ? metrics.rounds.map((round) => renderRoundItem(round, selected?.id || null)).join("") : '<div class="empty-state">No rounds recorded yet.</div>'}
+        </div>
+      </div>
+
+      <div class="rounds-insight">
+        <div class="rounds-insight-head">
+          <span class="section-icon" aria-hidden="true">${icon("gauge")}</span>
+          <div>
+            <h3>Round Details</h3>
+            <p>${selected ? escapeHtml(`Round ${selected.id} - ${roundStatusLabel(selected.status)}`) : "Select a round to inspect the full result."}</p>
+          </div>
+        </div>
+        ${selected ? renderRoundDetails(selected, stats) : '<div class="empty-state">Run the monitor once to populate round stats.</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderRoundDetails(round: MetricRound, stats: ReturnType<typeof roundStats>) {
+  const details = roundDetailStats(round);
+  const profile = roundProfile(round);
+  const rowPercent = stats.maxRows ? Math.max(4, Math.round((round.total_rows / stats.maxRows) * 100)) : 0;
+  const pageCount = round.page_count || details.pages || config.pages.length;
+  const locationCount = round.proxy_country_count || details.countries || configuredLocationCount();
+  const pageCountry = `${pageCount} URLs / ${locationCount} locations`;
+  return `
+    <div class="latest-round-card round-detail-card">
+      <div class="latest-round-top">
+        <div>
+          <span class="round-detail-eyebrow">Selected round</span>
+          <strong>Round ${round.id}</strong>
+        </div>
+        <div class="round-detail-actions">
+          ${renderRoundStatus(round.status)}
+        </div>
+      </div>
+      <dl class="round-detail-grid">
+        <div><dt>Started</dt><dd>${escapeHtml(round.started_at ? shortDate(round.started_at) : "-")}</dd></div>
+        <div><dt>Completed</dt><dd>${escapeHtml(round.completed_at ? shortDate(round.completed_at) : "-")}</dd></div>
+        <div><dt>Duration</dt><dd>${escapeHtml(durationFromMs(round.duration_ms))}</dd></div>
+        <div><dt>Avg Response</dt><dd>${escapeHtml(details.avgResponseMs ? `${details.avgResponseMs} ms` : "-")}</dd></div>
+      </dl>
+      <div class="round-breakdown">
+        <div><span>Hit Rate</span><strong>${escapeHtml(`${details.hitRate}%`)}</strong></div>
+        <div><span>Hits</span><strong>${escapeHtml(compactNumber(details.hits))}</strong></div>
+        <div><span>Issues</span><strong>${escapeHtml(compactNumber(details.issues))}</strong></div>
+        <div><span>Rechecks</span><strong>${escapeHtml(compactNumber(round.recheck_rows))}</strong></div>
+      </div>
+      <div class="round-load">
+        <span><b style="width:${rowPercent}%"></b></span>
+        <small>${escapeHtml(`${compactNumber(round.total_rows)} rows captured - ${pageCountry}`)}</small>
+      </div>
+      <dl class="round-meta-list">
+        <div><dt>Reason</dt><dd>${escapeHtml(round.reason || "scheduled")}</dd></div>
+        <div><dt>Pages Seen</dt><dd>${escapeHtml(compactNumber(details.pages))}</dd></div>
+        <div><dt>Countries Seen</dt><dd>${escapeHtml(compactNumber(details.countries))}</dd></div>
+        <div><dt>Cloudflare Edges</dt><dd>${escapeHtml(compactNumber(details.edges))}</dd></div>
+        <div><dt>Timeout</dt><dd>${escapeHtml(profile.timeout ? `${profile.timeout}s` : `${config.timeout}s`)}</dd></div>
+        <div><dt>Delay</dt><dd>${escapeHtml(profile.delay ? `${profile.delay}s` : `${config.delay}s`)}</dd></div>
+      </dl>
+      ${round.error ? `<p class="round-error">${escapeHtml(round.error)}</p>` : ""}
+    </div>
+  `;
+}
+
+function renderRoundItem(round: MetricRound, selectedId: number | null) {
+  const rows = `${compactNumber(round.total_rows)} rows`;
+  const durationLabel = durationFromMs(round.duration_ms);
+  const selected = selectedId === round.id;
+  return `
+    <button type="button" class="round-item ${round.status} ${selected ? "selected" : ""}" data-round-id="${round.id}" aria-pressed="${selected ? "true" : "false"}">
+      <div class="round-marker" aria-hidden="true"></div>
+      <div class="round-item-main">
+        <div class="round-item-head">
+          <strong>Round ${round.id}</strong>
+          ${renderRoundStatus(round.status)}
+        </div>
+        <p>${escapeHtml(round.reason || "scheduled")} &middot; ${escapeHtml(round.started_at ? shortDate(round.started_at) : "-")}</p>
+        ${round.error ? `<small class="round-error">${escapeHtml(round.error)}</small>` : ""}
+      </div>
+      <div class="round-item-metrics">
+        <span>${escapeHtml(rows)}</span>
+        <span>${escapeHtml(durationLabel)}</span>
+        <span>${escapeHtml(`${round.page_count || config.pages.length} URLs`)}</span>
+      </div>
+    </button>
+  `;
+}
+
+function renderRoundStatus(status: MetricRound["status"]) {
+  return `<span class="round-status ${status}">${escapeHtml(roundStatusLabel(status))}</span>`;
+}
+
+function roundStats() {
+  const rounds = metrics.rounds;
+  const total = rounds.length;
+  const rows = rounds.reduce((sum, round) => sum + round.total_rows, 0);
+  const maxRows = Math.max(0, ...rounds.map((round) => round.total_rows));
+
+  return {
+    latest: rounds[0] || null,
+    maxRows,
+    rows,
+    total,
+  };
+}
+
+function selectedRound() {
+  if (!metrics.rounds.length) {
+    selectedRoundId = null;
+    return null;
+  }
+
+  const selected = selectedRoundId ? metrics.rounds.find((round) => round.id === selectedRoundId) : null;
+  const round = selected || metrics.rounds[0];
+  selectedRoundId = round.id;
+  return round;
+}
+
+function roundRows(round: MetricRound) {
+  const id = String(round.id);
+  return metrics.rows.filter((row) => metricRoundBase(row.round_id || row.round || "") === id);
+}
+
+function roundDetailStats(round: MetricRound) {
+  const rows = roundRows(round);
+  const hits = rows.filter((row) => cacheStatus(row) === "HIT").length;
+  const misses = rows.filter((row) => isMissLike(cacheStatus(row))).length;
+  const errors = rows.filter((row) => row.error || cacheStatus(row) === "FAIL").length;
+  const responseValues = rows.map((row) => Number(row.response_ms)).filter((value) => Number.isFinite(value) && value > 0);
+  const pages = uniqueValues(rows.map((row) => row.page || row.url || "")).length;
+  const countries = uniqueValues(rows.map((row) => row.proxy_country || "")).length;
+  const edges = uniqueValues(rows.map((row) => row.cf_edge || "")).length;
+  const total = rows.length || round.total_rows;
+
+  return {
+    avgResponseMs: averageNumber(responseValues),
+    countries,
+    edges,
+    hitRate: total ? Math.round((hits / total) * 100) : 0,
+    hits,
+    issues: misses + errors,
+    pages,
+  };
+}
+
+function roundProfile(round: MetricRound) {
+  try {
+    return JSON.parse(round.config_json || "{}") as Partial<Config>;
+  } catch {
+    return {};
+  }
+}
+
+function roundsSubtitle(stats: ReturnType<typeof roundStats>) {
+  if (!stats.total) return "No rounds yet. Start the monitor to build a run history.";
+  const latest = stats.latest;
+  const latestText = latest?.started_at ? `latest ${relativeTime(latest.started_at)}` : "latest saved";
+  return `${stats.total} retained rounds, ${compactNumber(stats.rows)} rows, ${latestText}`;
+}
+
+function roundsLiveLabel() {
+  if (statusState.busy) return statusState.round ? `Round ${statusState.round} running` : "Round running";
+  if (statusState.running) return statusState.nextRunAt ? `Armed - ${relativeTime(statusState.nextRunAt)}` : "Armed";
+  return "Stopped";
+}
+
+function roundStatusLabel(status: MetricRound["status"]) {
+  const labels: Record<MetricRound["status"], string> = {
+    completed: "Completed",
+    failed: "Failed",
+    running: "Running",
+    stopped: "Stopped",
+  };
+  return labels[status] || status;
+}
+
+function configuredLocationCount() {
+  return config.proxyCountries.split(",").map((country) => country.trim()).filter(Boolean).length + (config.noDirect ? 0 : 1);
+}
+
+function renderLogs() {
+  const logs = statusState.logs.slice(-160);
+  return `
+    <section class="logs-panel full-log-panel">
+      <div class="section-head">
+        <h2>Collector Log</h2>
+        <span data-log-meta>${logMeta(logs.length)}</span>
+      </div>
+      <pre data-log-output>${escapeHtml(logs.join("\n") || "No collector output yet.")}</pre>
     </section>
   `;
 }
 
 function updateRuntimeView() {
+  const statusChip = app.querySelector<HTMLElement>("[data-status-chip]");
   const statusDot = app.querySelector<HTMLElement>("[data-status-dot]");
   const statusText = app.querySelector<HTMLElement>("[data-status-label]");
+  const crawlProgress = app.querySelector<HTMLElement>("[data-crawl-progress]");
+  const nextRunCountdown = app.querySelector<HTMLElement>("[data-next-run-countdown]");
   const actions = app.querySelector<HTMLElement>("[data-actions]");
-  const statusStrip = app.querySelector<HTMLElement>('[data-region="status-strip"]');
 
-  if (!statusDot || !statusText || !actions || !statusStrip) {
+  if (!statusChip || !statusDot || !statusText || !crawlProgress || !nextRunCountdown || !actions) {
     const activeForm = activeTab === "config" || activeTab === "proxies";
     if (!activeForm || !formDirty) render();
     return;
   }
 
+  statusChip.classList.toggle("on", statusState.busy || statusState.running);
   statusDot.classList.toggle("on", statusState.busy || statusState.running);
   statusText.textContent = runtimeStatusLabel();
+  crawlProgress.innerHTML = renderCrawlProgress();
+  nextRunCountdown.innerHTML = renderNextRunCountdown();
   actions.innerHTML = renderActionButtons();
   wireActionEvents();
-  statusStrip.innerHTML = renderStatusCards();
 
   if (activeTab === "proxies" && !formDirty) {
     const used = usedProxyRows();
@@ -355,23 +622,159 @@ function updateRuntimeView() {
     return;
   }
 
+  if (activeTab === "logs") {
+    const logs = statusState.logs.slice(-160);
+    setText("[data-log-meta]", logMeta(logs.length));
+    setText("[data-log-output]", logs.join("\n") || "No collector output yet.");
+    return;
+  }
+
+  if (activeTab === "age") {
+    setText("[data-age-timestamp]", metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "");
+    setHtml("[data-age-list]", topAgeRows().map(renderAgeRow).join("") || '<div class="empty-state">No cache age data yet.</div>');
+    return;
+  }
+
+  if (activeTab === "rounds") {
+    setHtml("[data-rounds-view]", renderRoundsContent());
+    wireRoundEvents();
+    return;
+  }
+
   if (activeTab !== "metrics") return;
 
   updateMetricList();
-  setText("[data-age-timestamp]", metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "");
-  setHtml("[data-age-list]", topAgeRows().map(renderAgeRow).join(""));
-  setText("[data-log-round]", `round ${statusState.round}`);
-  setText("[data-log-output]", statusState.logs.slice(-28).join("\n") || "No collector output yet.");
 }
 
 function runtimeStatusLabel() {
-  return statusState.busy ? "Running" : statusState.running ? "Armed" : "Stopped";
+  if (statusState.busy) return statusState.round ? `Running - round ${statusState.round}` : "Running";
+  if (statusState.running) return "Armed";
+  return "Stopped";
+}
+
+function renderNextRunCountdown() {
+  const info = nextRunCountdownInfo();
+  if (!info) return "";
+
+  return `
+    <div class="next-run-card" role="timer" aria-live="polite" title="${escapeAttr(`Next run: ${shortDate(statusState.nextRunAt || "")}`)}" style="--next-run-progress:${info.percent}%">
+      <span class="next-run-pulse" aria-hidden="true"><i></i></span>
+      <span class="next-run-copy">
+        <strong>Next round</strong>
+      </span>
+      <span class="next-run-clock">${escapeHtml(info.clock)}</span>
+      <span class="next-run-track" aria-hidden="true"><i></i></span>
+    </div>
+  `;
+}
+
+function nextRunCountdownInfo() {
+  if (!statusState.running || statusState.busy || !statusState.nextRunAt) return null;
+
+  const nextTime = Date.parse(statusState.nextRunAt);
+  if (!Number.isFinite(nextTime)) return null;
+
+  const remainingSeconds = Math.max(0, Math.ceil((nextTime - Date.now()) / 1000));
+  const totalSeconds = Math.max(1, nextRunIntervalSeconds());
+  const elapsedSeconds = Math.max(0, totalSeconds - remainingSeconds);
+  const percent = Math.min(100, Math.round((elapsedSeconds / totalSeconds) * 100));
+  const nextRound = statusState.round ? statusState.round + 1 : metrics.summary.totalRounds + 1;
+
+  return {
+    clock: remainingSeconds ? countdownClock(remainingSeconds) : "Starting",
+    label: remainingSeconds ? `Round ${nextRound} starts in ${compactCountdown(remainingSeconds)}` : "Starting next round",
+    percent,
+    remainingSeconds,
+  };
+}
+
+function nextRunIntervalSeconds() {
+  return metrics.summary.latestMissLike > 0 || metrics.summary.latestErrors > 0
+    ? config.missIntervalSeconds
+    : config.hitIntervalSeconds;
+}
+
+function syncNextRunTicker() {
+  const active = Boolean(statusState?.running && !statusState.busy && statusState.nextRunAt);
+  if (active && nextRunTimer === null) {
+    nextRunTimer = window.setInterval(updateNextRunCountdownView, 1000);
+  }
+
+  if (!active && nextRunTimer !== null) {
+    clearInterval(nextRunTimer);
+    nextRunTimer = null;
+    dueRefreshForNextRun = null;
+  }
+}
+
+function updateNextRunCountdownView() {
+  const host = app.querySelector<HTMLElement>("[data-next-run-countdown]");
+  if (!host) return;
+
+  const info = nextRunCountdownInfo();
+  host.innerHTML = renderNextRunCountdown();
+
+  if (info?.remainingSeconds === 0 && statusState.nextRunAt && dueRefreshForNextRun !== statusState.nextRunAt) {
+    dueRefreshForNextRun = statusState.nextRunAt;
+    refreshRuntime().catch(console.error);
+  }
+}
+
+function renderCrawlProgress() {
+  if (!statusState.busy) return "";
+
+  const progress = crawlProgressInfo();
+  const round = statusState.round ? `Round ${statusState.round}` : "Current round";
+  return `
+    <div class="crawl-progress" role="status" aria-live="polite" title="${escapeAttr(progress.activeUrl || "")}" style="--crawl-progress:${progress.percent}%">
+      <span class="crawl-spinner" aria-hidden="true"></span>
+      <span class="crawl-copy">
+        <strong>Requesting URLs</strong>
+        <span>${escapeHtml(round)} - ${progress.requested} of ${progress.total} requested</span>
+      </span>
+      <span class="crawl-track" aria-hidden="true">
+        <i></i>
+        <b>${progress.requested}/${progress.total}</b>
+      </span>
+    </div>
+  `;
+}
+
+function crawlProgressInfo() {
+  const live = statusState.crawl;
+  if (live && live.totalUrls > 0) {
+    const requested = Math.min(live.totalUrls, Math.max(0, live.requestedUrls));
+    const percent = Math.min(100, Math.round((requested / live.totalUrls) * 100));
+    return { activeUrl: live.activeUrl, percent, requested, total: live.totalUrls };
+  }
+
+  const total = config.pages.length;
+  const round = String(statusState.round || "");
+  const pages = new Set<string>();
+
+  if (round) {
+    for (const row of metrics.rows) {
+      const rowRound = metricRoundBase(row.round_id || row.round || "");
+      if (rowRound === round && row.page) pages.add(row.page);
+    }
+  }
+
+  const requested = Math.min(total, pages.size);
+  const percent = total ? Math.min(100, Math.round((requested / total) * 100)) : 0;
+  return { activeUrl: null, percent, requested, total };
+}
+
+function metricRoundBase(value: string) {
+  return String(value || "").replace(/-recheck$/, "");
 }
 
 function renderActionButtons() {
+  const runNowButton = statusState.busy
+    ? ""
+    : `<button class="button secondary" data-action="run-once">Run Now</button>`;
   return `
     <button class="icon-button" data-action="refresh" title="Refresh" aria-label="Refresh">${icon("refresh")}</button>
-    <button class="button secondary" data-action="run-once" ${statusState.busy ? "disabled" : ""}>Run Now</button>
+    ${runNowButton}
     ${
       statusState.running || statusState.busy
         ? '<button class="button danger" data-action="stop">Stop</button>'
@@ -380,42 +783,63 @@ function renderActionButtons() {
   `;
 }
 
-function renderStatusCards() {
-  return `
-    ${statCard("State", runtimeStatusLabel(), statusState.lastReason || "", "pulse")}
-    ${statCard("Latest Hits", String(metrics.summary.latestHits), `${metrics.summary.latestCells} cells`, "bars")}
-    ${statCard(
-      "Miss / Recheck",
-      String(metrics.summary.latestMissLike + metrics.summary.latestErrors),
-      "latest samples",
-      "shuffle",
-    )}
-    ${statCard("Max Cache Age", duration(metrics.summary.maxAge), "Age header", "clock")}
-    ${statCard("Avg Response", `${metrics.summary.avgResponseMs || 0} ms`, "latest cells", "gauge")}
-    ${statCard(
-      "Next Run",
-      statusState.nextRunAt ? relativeTime(statusState.nextRunAt) : "None",
-      statusState.lastRunAt ? `last ${relativeTime(statusState.lastRunAt)}` : "",
-      "calendar",
-    )}
-  `;
+function logMeta(count: number) {
+  const round = statusState.round ? `round ${statusState.round}` : "no round";
+  return `${round} - ${count} lines`;
 }
 
-function sampleMetricRows() {
-  return [...metrics.rows].reverse();
-}
+function metricRowsIndex() {
+  if (metricRowsCache?.source === metrics.rows) return metricRowsCache.index;
 
-function filteredMetricRows(samples = sampleMetricRows()) {
-  const query = metricFilters.query.trim().toLowerCase();
-  return samples.filter((row) => {
-    if (metricFilters.country && row.proxy_country !== metricFilters.country) return false;
-    if (metricFilters.page && row.page !== metricFilters.page) return false;
-    if (metricFilters.status && cacheStatus(row) !== metricFilters.status) return false;
-    if (!query) return true;
-
-    return [row.page, row.url, row.proxy_country, row.cf_edge, row.proxy, row.error, row.cf_ray]
-      .some((value) => String(value || "").toLowerCase().includes(query));
+  const indexedRows = [...metrics.rows].reverse().map((row) => {
+    const status = cacheStatus(row);
+    return {
+      row,
+      searchText: metricSearchText(row, status),
+      status,
+    };
   });
+
+  const index: MetricRowsIndex = {
+    countries: uniqueValues(indexedRows.map(({ row }) => row.proxy_country)),
+    pages: uniqueValues(indexedRows.map(({ row }) => row.page)),
+    rows: indexedRows,
+    statuses: uniqueValues(indexedRows.map(({ status }) => status)),
+  };
+  metricRowsCache = { source: metrics.rows, index };
+  return index;
+}
+
+function metricSearchText(row: MetricRow, status = cacheStatus(row)) {
+  return [
+    row.page,
+    row.url,
+    row.proxy_country,
+    countryName(row.proxy_country || ""),
+    row.cf_edge,
+    row.proxy,
+    row.error,
+    row.cf_ray,
+    row.status_code,
+    status,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function filteredMetricRows() {
+  const query = metricFilters.query.trim().toLowerCase();
+  const rows: MetricRow[] = [];
+
+  for (const { row, searchText, status } of metricRowsIndex().rows) {
+    if (metricFilters.country && row.proxy_country !== metricFilters.country) continue;
+    if (metricFilters.page && row.page !== metricFilters.page) continue;
+    if (metricFilters.status && status !== metricFilters.status) continue;
+    if (query && !searchText.includes(query)) continue;
+    rows.push(row);
+  }
+
+  return rows;
 }
 
 function metricTimeColumns(rows: MetricRow[]) {
@@ -500,11 +924,21 @@ function metricTimeColumn(value: string): MetricTimeColumn {
 }
 
 function metricBatchColumn(row: MetricRow): MetricTimeColumn {
+  const cached = metricColumnCache.get(row);
+  if (cached) return cached;
+
   const column = metricTimeColumn(row.timestamp_utc || "");
-  if (!row.round) return column;
-  const recheck = row.round.endsWith("-recheck");
-  const round = recheck ? row.round.replace(/-recheck$/, "") : row.round;
-  return { ...column, key: `batch-${row.round}`, label: recheck ? `Recheck ${round}` : `First ${round}` };
+  const roundValue = row.round || row.round_id;
+  if (!roundValue) {
+    metricColumnCache.set(row, column);
+    return column;
+  }
+
+  const recheck = roundValue.endsWith("-recheck");
+  const round = recheck ? roundValue.replace(/-recheck$/, "") : roundValue;
+  const batchColumn = { ...column, key: `batch-${roundValue}`, label: recheck ? `Recheck ${round}` : `Round ${round}` };
+  metricColumnCache.set(row, batchColumn);
+  return batchColumn;
 }
 
 function batchTimeRange(start: number, end: number) {
@@ -517,8 +951,8 @@ function batchTimeRange(start: number, end: number) {
 function renderMetricTimeHeader(columns: MetricTimeColumn[]) {
   return `
     <tr>
-      <th>URL</th>
-      <th>Country</th>
+      <th>Urls</th>
+      <th>Countries</th>
       ${columns.map((column) => `
         <th class="metric-time-heading ${column.key.endsWith("-recheck") ? "recheck-heading" : ""}" title="${escapeAttr(`${column.meta}, ${column.label}`)}">
           <strong>${escapeHtml(column.label)}</strong>
@@ -557,13 +991,11 @@ function metricMatrixStyle(columns: MetricTimeColumn[]) {
 function renderMetricMatrixRow(group: MetricTimeGroup, columns: MetricTimeColumn[]) {
   return `
     <tr>
-      <th class="url-cell">
+      <th class="url-cell compact-url-cell" title="${escapeAttr(group.page)}">
         <strong>${escapeHtml(group.page)}</strong>
-        <span>${escapeHtml(group.url)}</span>
       </th>
-      <td>
-        <strong>${escapeHtml(group.country)}</strong>
-        <span>${escapeHtml(group.countryLabel)}</span>
+      <td class="country-cell" title="${escapeAttr(group.countryLabel)}">
+        <strong>${escapeHtml(group.countryLabel)}</strong>
       </td>
       ${columns.map((column) => renderMetricStatusCell(group.cells.get(column.key))).join("")}
     </tr>
@@ -579,10 +1011,11 @@ function renderMetricStatusCell(row?: MetricRow) {
 
   return `
     <td class="status-cell">
-      <button class="status-pill status-button ${tone}" type="button" data-sample-toggle aria-expanded="false">
-        ${escapeHtml(status)}
+      <button class="status-pill status-button ${tone}" type="button">
+        <strong>${escapeHtml(status)}</strong>
+        <span>${escapeHtml(statusMeta(row))}</span>
       </button>
-      <div class="sample-details" hidden>
+      <div class="sample-details">
         ${details}
       </div>
     </td>
@@ -594,6 +1027,7 @@ function renderMetricStatusDetails(row: MetricRow) {
   const response = row.response_ms ? `${row.response_ms} ms` : "-";
   const age = Number(row.age_seconds) || 0;
   const details = [
+    ["Round", row.round_id || row.round || "-"],
     ["Sample", sampleStage(row)],
     ["Status", status],
     ["Age", duration(age)],
@@ -620,9 +1054,17 @@ function renderMetricStatusDetails(row: MetricRow) {
   `;
 }
 
+function statusMeta(row: MetricRow) {
+  if (row.error) return row.status_code || "fail";
+  if (row.response_ms) return `${row.response_ms}ms`;
+  if (row.cf_edge) return row.cf_edge;
+  return row.status_code || "-";
+}
+
 function sampleStage(row: MetricRow) {
-  if (!row.round) return "Sample";
-  if (row.round.endsWith("-recheck")) return `Recheck after MISS interval`;
+  const round = row.round || row.round_id;
+  if (!round) return "Sample";
+  if (round.endsWith("-recheck")) return `Recheck after MISS interval`;
   return "First check";
 }
 
@@ -646,69 +1088,135 @@ function renderAgeRow(row: MetricsPayload["pageStats"][number]) {
 }
 
 function renderConfig() {
+  const summary = configSummary();
   return `
     <form class="form-panel config-panel" data-form="config">
       <div class="section-head">
         <h2><span class="section-icon" aria-hidden="true">${icon("settings")}</span>Configuration</h2>
-        <span>${config.pages.length} URLs</span>
+        <span>${summary.urls} URLs / ${summary.locations} locations</span>
       </div>
 
       <div class="config-body">
-        <section class="form-section target-section">
-          <div class="form-section-title">
-            <span class="section-icon" aria-hidden="true">${icon("link")}</span>
-            <h3>Target</h3>
-          </div>
-          <div class="config-grid two">
-            <label>SQLite DB<input name="output" value="${escapeAttr(config.output)}" /></label>
-          </div>
-          <label>URLs<textarea name="pages" rows="12">${escapeHtml(config.pages.join("\n"))}</textarea></label>
-        </section>
+        <div class="config-layout">
+          <div class="config-column config-main">
+            <section class="form-section target-section">
+              <div class="form-section-title">
+                <span class="section-icon" aria-hidden="true">${icon("link")}</span>
+                <div>
+                  <h3>Targets & Storage</h3>
+                  <p>Saved into ${escapeHtml(config.output)}</p>
+                </div>
+              </div>
+              <div class="config-grid two">
+                <label>
+                  SQLite Database
+                  <input name="output" value="${escapeAttr(config.output)}" spellcheck="false" />
+                </label>
+                <label>
+                  User Agent
+                  <input name="userAgent" value="${escapeAttr(config.userAgent)}" spellcheck="false" />
+                </label>
+              </div>
+              <label>
+                Target URLs
+                <textarea class="config-textarea-large" name="pages" rows="${Math.min(18, Math.max(10, config.pages.length + 2))}" spellcheck="false">${escapeHtml(config.pages.join("\n"))}</textarea>
+              </label>
+            </section>
 
-        <section class="form-section">
-          <div class="form-section-title">
-            <span class="section-icon" aria-hidden="true">${icon("timer")}</span>
-            <h3>Runtime</h3>
+            <section class="form-section">
+              <div class="form-section-title">
+                <span class="section-icon" aria-hidden="true">${icon("user")}</span>
+                <div>
+                  <h3>Proxy Locations</h3>
+                  <p>${summary.sources} active request sources</p>
+                </div>
+              </div>
+              <div class="config-grid two">
+                <label>
+                  Proxy Countries
+                  <textarea class="config-textarea-small" name="proxyCountries" rows="6" spellcheck="false">${escapeHtml(configProxyCountries().join("\n"))}</textarea>
+                </label>
+                <label>
+                  Max Proxies / Country
+                  <input name="maxProxiesPerCountry" type="number" min="1" max="100" value="${config.maxProxiesPerCountry}" />
+                </label>
+              </div>
+            </section>
           </div>
-          <div class="config-grid compact">
-            <label>Max Proxies / Country<input name="maxProxiesPerCountry" type="number" min="1" max="100" value="${config.maxProxiesPerCountry}" /></label>
-            <label>Timeout Seconds<input name="timeout" type="number" min="1" max="60" value="${config.timeout}" /></label>
-            <label>Delay Seconds<input name="delay" type="number" min="0" max="60" value="${config.delay}" /></label>
-            <label>HIT Interval<input name="hitIntervalSeconds" type="number" min="15" value="${config.hitIntervalSeconds}" /></label>
-            <label>MISS Interval<input name="missIntervalSeconds" type="number" min="15" value="${config.missIntervalSeconds}" /></label>
-          </div>
-        </section>
 
-        <section class="form-section">
-          <div class="form-section-title">
-            <span class="section-icon" aria-hidden="true">${icon("user")}</span>
-            <h3>Request Profile</h3>
-          </div>
-          <div class="config-grid two">
-            <label>Proxy Countries<input name="proxyCountries" value="${escapeAttr(config.proxyCountries)}" /></label>
-            <label>User Agent<input name="userAgent" value="${escapeAttr(config.userAgent)}" /></label>
-          </div>
-        </section>
+          <div class="config-column config-side">
+            <section class="form-section">
+              <div class="form-section-title">
+                <span class="section-icon" aria-hidden="true">${icon("timer")}</span>
+                <div>
+                  <h3>Schedule & Request Timing</h3>
+                  <p>${escapeHtml(summary.intervals)} intervals</p>
+                </div>
+              </div>
+              <div class="config-grid schedule">
+                <label>HIT Interval <small>seconds</small><input name="hitIntervalSeconds" type="number" min="15" max="86400" step="15" value="${config.hitIntervalSeconds}" /></label>
+                <label>Issue Interval <small>seconds</small><input name="missIntervalSeconds" type="number" min="15" max="86400" step="15" value="${config.missIntervalSeconds}" /></label>
+                <label>Request Timeout <small>seconds</small><input name="timeout" type="number" min="1" max="60" value="${config.timeout}" /></label>
+                <label>Retry Delay <small>seconds</small><input name="delay" type="number" min="0" max="60" value="${config.delay}" /></label>
+              </div>
+            </section>
 
-        <section class="form-section source-section">
-          <div class="form-section-title">
-            <span class="section-icon" aria-hidden="true">${icon("shuffle")}</span>
-            <h3>Sources</h3>
+            <section class="form-section source-section">
+              <div class="form-section-title">
+                <span class="section-icon" aria-hidden="true">${icon("shuffle")}</span>
+                <div>
+                  <h3>Source Controls</h3>
+                  <p>${summary.sources} enabled</p>
+                </div>
+              </div>
+              <div class="switches">
+                ${checkbox("shuffleProxies", "Shuffle proxies", config.shuffleProxies)}
+                ${checkbox("enableDirect", "Direct request", !config.noDirect)}
+                ${checkbox("enableProxySource", "Proxifly source", !config.noProxySource)}
+                ${checkbox("enableClarketmSource", "Clarketm source", !config.noClarketmSource)}
+              </div>
+            </section>
           </div>
-          <div class="switches">
-            ${checkbox("shuffleProxies", "Shuffle proxies", config.shuffleProxies)}
-            ${checkbox("noDirect", "Disable direct request", config.noDirect)}
-            ${checkbox("noProxySource", "Disable Proxifly source", config.noProxySource)}
-            ${checkbox("noClarketmSource", "Disable clarketm source", config.noClarketmSource)}
-          </div>
-        </section>
+        </div>
       </div>
 
       <div class="form-actions">
+        <span class="config-error" data-config-error hidden></span>
         <button class="button primary icon-text" type="submit">${icon("save")}<span>Save Configuration</span></button>
       </div>
     </form>
   `;
+}
+
+function configSummary() {
+  const countries = configProxyCountries();
+  const locations = countries.length + (config.noDirect ? 0 : 1);
+  const domains = uniqueValues(config.pages.map((page) => {
+    try {
+      return new URL(page).hostname;
+    } catch {
+      return "";
+    }
+  })).length;
+  const sources = [
+    !config.noDirect,
+    !config.noProxySource,
+    !config.noClarketmSource,
+  ].filter(Boolean).length;
+
+  return {
+    cells: compactNumber(config.pages.length * locations),
+    countries: countries.length,
+    domains,
+    intervals: `${duration(config.hitIntervalSeconds)} / ${duration(config.missIntervalSeconds)}`,
+    locations,
+    sources,
+    urls: config.pages.length,
+  };
+}
+
+function configProxyCountries() {
+  return normalizeConfigList(config.proxyCountries);
 }
 
 function renderProxies() {
@@ -840,9 +1348,16 @@ function wireEvents() {
       const key = input.dataset.filter as keyof typeof metricFilters;
       metricFilters = { ...metricFilters, [key]: input.value };
       metricPagination.page = 1;
-      updateMetricList();
+      queueMetricListUpdate(key === "query" ? 160 : 0);
     };
-    input.addEventListener("input", updateFilter);
+    if (input.dataset.filter === "query") {
+      input.addEventListener("input", updateFilter);
+      input.addEventListener("change", () => {
+        updateFilter();
+        queueMetricListUpdate(0);
+      });
+      return;
+    }
     input.addEventListener("change", updateFilter);
   });
 
@@ -856,8 +1371,8 @@ function wireEvents() {
   });
   configForm?.addEventListener("submit", saveConfig);
   proxiesForm?.addEventListener("submit", saveProxies);
-  wireMetricStatusEvents();
   wirePaginationEvents();
+  wireRoundEvents();
 }
 
 function wireActionEvents() {
@@ -882,28 +1397,70 @@ async function saveConfig(event: SubmitEvent) {
   event.preventDefault();
   const form = event.currentTarget as HTMLFormElement;
   const data = new FormData(form);
+  const pages = normalizeConfigList(data.get("pages"));
+  const proxyCountries = normalizeConfigList(data.get("proxyCountries"));
+
+  setConfigError("");
+  if (!pages.length) {
+    setConfigError("Add at least one target URL before saving.");
+    return;
+  }
+  if (!proxyCountries.length) {
+    setConfigError("Add at least one proxy country before saving.");
+    return;
+  }
+
   const next: Config = {
     ...config,
-    pages: String(data.get("pages") || "")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean),
+    pages,
     output: String(data.get("output") || ""),
-    proxyCountries: String(data.get("proxyCountries") || ""),
-    maxProxiesPerCountry: Number(data.get("maxProxiesPerCountry")),
-    timeout: Number(data.get("timeout")),
-    delay: Number(data.get("delay")),
-    hitIntervalSeconds: Number(data.get("hitIntervalSeconds")),
-    missIntervalSeconds: Number(data.get("missIntervalSeconds")),
+    proxyCountries: proxyCountries.join(","),
+    maxProxiesPerCountry: numberFormValue(data, "maxProxiesPerCountry", config.maxProxiesPerCountry),
+    timeout: numberFormValue(data, "timeout", config.timeout),
+    delay: numberFormValue(data, "delay", config.delay),
+    hitIntervalSeconds: numberFormValue(data, "hitIntervalSeconds", config.hitIntervalSeconds),
+    missIntervalSeconds: numberFormValue(data, "missIntervalSeconds", config.missIntervalSeconds),
     userAgent: String(data.get("userAgent") || ""),
     shuffleProxies: data.has("shuffleProxies"),
-    noDirect: data.has("noDirect"),
-    noProxySource: data.has("noProxySource"),
-    noClarketmSource: data.has("noClarketmSource"),
+    noDirect: !data.has("enableDirect"),
+    noProxySource: !data.has("enableProxySource"),
+    noClarketmSource: !data.has("enableClarketmSource"),
   };
-  await api<Config>("/api/config", { method: "PUT", body: JSON.stringify(next) });
-  formDirty = false;
-  await loadAll();
+
+  try {
+    await api<Config>("/api/config", { method: "PUT", body: JSON.stringify(next) });
+    formDirty = false;
+    await loadAll();
+  } catch (error) {
+    setConfigError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function normalizeConfigList(value: FormDataEntryValue | string | null) {
+  const seen = new Set<string>();
+  return String(value || "")
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function numberFormValue(data: FormData, name: string, fallback: number) {
+  const raw = String(data.get(name) || "").trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function setConfigError(message: string) {
+  const error = app.querySelector<HTMLElement>("[data-config-error]");
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
 }
 
 async function saveProxies(event: SubmitEvent) {
@@ -916,19 +1473,18 @@ async function saveProxies(event: SubmitEvent) {
 }
 
 function updateMetricList() {
-  const samples = sampleMetricRows();
-  const rows = filteredMetricRows(samples);
+  if (activeTab !== "metrics") return;
+
+  const rows = filteredMetricRows();
   const timeColumns = metricTimeColumns(rows);
   const groups = metricTimeGroups(rows, timeColumns);
   const pagination = paginationInfo(groups.length);
   const pageGroups = groups.slice(pagination.start, pagination.end);
-  const count = app.querySelector<HTMLElement>("[data-filter-count]");
   const table = app.querySelector<HTMLTableElement>("[data-metric-table]");
   const colgroup = app.querySelector<HTMLTableColElement>("[data-filter-cols]");
   const head = app.querySelector<HTMLTableSectionElement>("[data-filter-head]");
   const body = app.querySelector<HTMLTableSectionElement>("[data-filter-body]");
   const paginationEl = app.querySelector<HTMLElement>("[data-pagination]");
-  if (count) count.textContent = `${rows.length} of ${samples.length} fetched`;
   if (table) table.setAttribute("style", metricMatrixStyle(timeColumns));
   if (colgroup) colgroup.innerHTML = renderMetricCols(timeColumns);
   if (head) head.innerHTML = renderMetricTimeHeader(timeColumns);
@@ -938,18 +1494,36 @@ function updateMetricList() {
       : renderEmptyListRow(timeColumns);
   }
   if (paginationEl) paginationEl.innerHTML = renderPaginationControls(pagination);
-  wireMetricStatusEvents();
   wirePaginationEvents();
 }
 
-function wirePaginationEvents() {
-  app.querySelector<HTMLSelectElement>("[data-pagination-size]")?.addEventListener("change", (event) => {
-    metricPagination = {
-      page: 1,
-      pageSize: Number((event.currentTarget as HTMLSelectElement).value) || metricPagination.pageSize,
-    };
+function queueMetricListUpdate(delayMs: number) {
+  if (metricFilterTimer !== null) {
+    clearTimeout(metricFilterTimer);
+    metricFilterTimer = null;
+  }
+
+  if (!delayMs) {
     updateMetricList();
-    scrollMetricTableToTop();
+    return;
+  }
+
+  metricFilterTimer = window.setTimeout(() => {
+    metricFilterTimer = null;
+    updateMetricList();
+  }, delayMs);
+}
+
+function wirePaginationEvents() {
+  app.querySelectorAll<HTMLButtonElement>("[data-pagination-size]").forEach((button) => {
+    button.addEventListener("click", () => {
+      metricPagination = {
+        page: 1,
+        pageSize: Number(button.dataset.paginationSize) || metricPagination.pageSize,
+      };
+      updateMetricList();
+      scrollMetricTableToTop();
+    });
   });
 
   app.querySelectorAll<HTMLButtonElement>("[data-page-action]").forEach((button) => {
@@ -958,28 +1532,6 @@ function wirePaginationEvents() {
       metricPagination.page += direction;
       updateMetricList();
       scrollMetricTableToTop();
-    });
-  });
-}
-
-function wireMetricStatusEvents() {
-  app.querySelectorAll<HTMLButtonElement>("[data-sample-toggle]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const cell = button.closest<HTMLElement>(".status-cell");
-      const details = cell?.querySelector<HTMLElement>(".sample-details");
-      if (!cell || !details) return;
-
-      const willOpen = details.hidden === true;
-      app.querySelectorAll<HTMLElement>(".sample-details").forEach((panel) => {
-        panel.hidden = true;
-        panel.closest(".status-cell")?.classList.remove("detail-open");
-        panel.parentElement?.querySelector<HTMLButtonElement>("[data-sample-toggle]")?.setAttribute("aria-expanded", "false");
-      });
-
-      details.hidden = !willOpen;
-      cell.classList.toggle("detail-open", willOpen);
-      button.setAttribute("aria-expanded", String(willOpen));
     });
   });
 }
@@ -1001,14 +1553,28 @@ function renderPaginationControls(pagination: ReturnType<typeof paginationInfo>)
   const isLast = pagination.page >= pagination.pageCount;
 
   return `
-    <label class="page-size-control">
-      Rows
-      <select data-pagination-size>
+    <div class="page-size-control">
+      <span>Rows</span>
+      <div class="page-size-dropdown">
+        <button class="page-size-trigger" type="button" aria-haspopup="listbox" aria-label="Rows per page">
+          <span>${pagination.pageSize}</span>
+          <i aria-hidden="true"></i>
+        </button>
+        <div class="page-size-options" role="listbox" aria-label="Rows per page">
         ${PAGE_SIZE_OPTIONS.map(
-          (size) => `<option value="${size}" ${pagination.pageSize === size ? "selected" : ""}>${size}</option>`,
+          (size) => `
+            <button
+              type="button"
+              class="${pagination.pageSize === size ? "selected" : ""}"
+              data-pagination-size="${size}"
+              role="option"
+              aria-selected="${pagination.pageSize === size ? "true" : "false"}"
+            >${size}</button>
+          `,
         ).join("")}
-      </select>
-    </label>
+        </div>
+      </div>
+    </div>
     <span class="pagination-range">Showing ${from}-${to} of ${pagination.total}</span>
     <div class="page-controls">
       <button class="icon-button compact" data-page-action="prev" title="Previous page" aria-label="Previous page" ${
@@ -1025,21 +1591,6 @@ function renderPaginationControls(pagination: ReturnType<typeof paginationInfo>)
 function scrollMetricTableToTop() {
   const scroll = app.querySelector<HTMLElement>(".table-scroll");
   if (scroll) scroll.scrollTop = 0;
-}
-
-function targetLabel(values: string[]) {
-  const hosts = uniqueValues(values.map(hostLabel).filter(Boolean));
-  if (!hosts.length) return "Targets";
-  if (hosts.length === 1) return hosts[0];
-  return `${hosts.length} hosts`;
-}
-
-function hostLabel(value: string) {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
 }
 
 function countryName(code: string) {
@@ -1079,6 +1630,49 @@ function duration(seconds: number) {
   if (hours) return `${hours}h ${minutes}m`;
   if (minutes) return `${minutes}m`;
   return `${seconds}s`;
+}
+
+function averageNumber(values: number[]) {
+  if (!values.length) return 0;
+  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function wireRoundEvents() {
+  app.querySelectorAll<HTMLButtonElement>("[data-round-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.roundId);
+      selectedRoundId = Number.isFinite(id) ? id : null;
+      setHtml("[data-rounds-view]", renderRoundsContent());
+      wireRoundEvents();
+    });
+  });
+}
+
+function durationFromMs(ms: number) {
+  if (!ms) return "0s";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return duration(Math.round(ms / 1000));
+}
+
+function compactNumber(value: number) {
+  return new Intl.NumberFormat([], { maximumFractionDigits: 1, notation: value >= 10000 ? "compact" : "standard" }).format(value);
+}
+
+function compactCountdown(seconds: number) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(rest).padStart(2, "0")}s`;
+  if (minutes) return `${minutes}m ${String(rest).padStart(2, "0")}s`;
+  return `${rest}s`;
+}
+
+function countdownClock(seconds: number) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
 function relativeTime(value: string) {
