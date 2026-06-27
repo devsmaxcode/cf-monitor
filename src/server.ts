@@ -1,6 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Cron } from "croner";
 import index from "../public/index.html";
 import {
   createMetricRound,
@@ -19,6 +18,7 @@ type Config = {
   maxProxiesPerCountry: number;
   timeout: number;
   delay: number;
+  roundIntervalSeconds: number;
   hitIntervalSeconds: number;
   missIntervalSeconds: number;
   noDirect: boolean;
@@ -86,6 +86,7 @@ const defaultConfig: Config = {
   maxProxiesPerCountry: 8,
   timeout: 5,
   delay: 0,
+  roundIntervalSeconds: 900,
   hitIntervalSeconds: 900,
   missIntervalSeconds: 120,
   noDirect: false,
@@ -109,7 +110,7 @@ const state: MonitorState = {
   logs: [],
 };
 
-let scheduledJob: Cron | null = null;
+let scheduledJob: Timer | null = null;
 let activeMonitorProcess: ReturnType<typeof Bun.spawn> | null = null;
 let stopRequested = false;
 let requestedCrawlPages = new Set<string>();
@@ -152,6 +153,12 @@ async function readConfig(): Promise<Config> {
 function sanitizeConfig(value: Partial<Config> & { baseUrl?: string }): Config {
   const { baseUrl, ...configValue } = value;
   const legacyBaseUrl = String(baseUrl || legacyDefaultBaseUrl).trim();
+  const roundIntervalSeconds = clamp(
+    Number(value.roundIntervalSeconds ?? value.hitIntervalSeconds),
+    15,
+    86400,
+    defaultConfig.roundIntervalSeconds,
+  );
   return {
     ...defaultConfig,
     ...configValue,
@@ -161,7 +168,8 @@ function sanitizeConfig(value: Partial<Config> & { baseUrl?: string }): Config {
     maxProxiesPerCountry: clamp(Number(value.maxProxiesPerCountry), 1, 100, 8),
     timeout: clamp(Number(value.timeout), 1, 60, 5),
     delay: clamp(Number(value.delay), 0, 60, 0),
-    hitIntervalSeconds: clamp(Number(value.hitIntervalSeconds), 15, 86400, 900),
+    roundIntervalSeconds,
+    hitIntervalSeconds: roundIntervalSeconds,
     missIntervalSeconds: clamp(Number(value.missIntervalSeconds), 15, 86400, 120),
     output: normalizeMetricsOutput(String(value.output || defaultConfig.output).trim()),
     proxyCountries: String(value.proxyCountries || defaultConfig.proxyCountries).trim(),
@@ -500,7 +508,7 @@ function stopActiveMonitor() {
 
 function clearScheduledJob() {
   if (!scheduledJob) return;
-  scheduledJob.stop();
+  clearTimeout(scheduledJob);
   scheduledJob = null;
 }
 
@@ -508,23 +516,16 @@ async function scheduleNext(config: Config) {
   if (!state.running) return;
   clearScheduledJob();
 
-  let delay = config.hitIntervalSeconds;
-  try {
-    const summary = (await buildMetrics(config)).summary;
-    delay =
-      summary.latestMissLike > 0 || summary.latestErrors > 0 ? config.missIntervalSeconds : config.hitIntervalSeconds;
-  } catch (error) {
-    pushLog(`schedule metrics read failed: ${errorMessage(error)}`);
-  }
+  const delay = config.roundIntervalSeconds;
 
   const next = new Date(Date.now() + delay * 1000);
   state.nextRunAt = next.toISOString();
   pushLog(`[${new Date().toLocaleString()}] next run in ${delay}s`);
 
-  scheduledJob = new Cron(next, { name: "cloudflare-cache-monitor-next-run", maxRuns: 1, protect: true }, () => {
+  scheduledJob = setTimeout(() => {
     scheduledJob = null;
     void runMonitorRound("schedule");
-  });
+  }, Math.max(0, next.getTime() - Date.now()));
 }
 
 async function buildMetrics(config: Config) {

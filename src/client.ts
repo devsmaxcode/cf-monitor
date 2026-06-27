@@ -7,6 +7,7 @@ type Config = {
   maxProxiesPerCountry: number;
   timeout: number;
   delay: number;
+  roundIntervalSeconds: number;
   hitIntervalSeconds: number;
   missIntervalSeconds: number;
   noDirect: boolean;
@@ -689,9 +690,7 @@ function nextRunCountdownInfo() {
 }
 
 function nextRunIntervalSeconds() {
-  return metrics.summary.latestMissLike > 0 || metrics.summary.latestErrors > 0
-    ? config.missIntervalSeconds
-    : config.hitIntervalSeconds;
+  return config.roundIntervalSeconds;
 }
 
 function syncNextRunTicker() {
@@ -1150,12 +1149,11 @@ function renderConfig() {
                 <span class="section-icon" aria-hidden="true">${icon("timer")}</span>
                 <div>
                   <h3>Schedule & Request Timing</h3>
-                  <p>${escapeHtml(summary.intervals)} intervals</p>
+                  <p>${escapeHtml(summary.intervals)} round interval</p>
                 </div>
               </div>
               <div class="config-grid schedule">
-                <label>HIT Interval <small>seconds</small><input name="hitIntervalSeconds" type="number" min="15" max="86400" step="15" value="${config.hitIntervalSeconds}" /></label>
-                <label>Issue Interval <small>seconds</small><input name="missIntervalSeconds" type="number" min="15" max="86400" step="15" value="${config.missIntervalSeconds}" /></label>
+                <label>Round Interval <small>seconds</small><input name="roundIntervalSeconds" type="number" min="15" max="86400" step="15" value="${config.roundIntervalSeconds}" /></label>
                 <label>Request Timeout <small>seconds</small><input name="timeout" type="number" min="1" max="60" value="${config.timeout}" /></label>
                 <label>Retry Delay <small>seconds</small><input name="delay" type="number" min="0" max="60" value="${config.delay}" /></label>
               </div>
@@ -1208,7 +1206,7 @@ function configSummary() {
     cells: compactNumber(config.pages.length * locations),
     countries: countries.length,
     domains,
-    intervals: `${duration(config.hitIntervalSeconds)} / ${duration(config.missIntervalSeconds)}`,
+    intervals: duration(config.roundIntervalSeconds),
     locations,
     sources,
     urls: config.pages.length,
@@ -1418,7 +1416,8 @@ async function saveConfig(event: SubmitEvent) {
     maxProxiesPerCountry: numberFormValue(data, "maxProxiesPerCountry", config.maxProxiesPerCountry),
     timeout: numberFormValue(data, "timeout", config.timeout),
     delay: numberFormValue(data, "delay", config.delay),
-    hitIntervalSeconds: numberFormValue(data, "hitIntervalSeconds", config.hitIntervalSeconds),
+    roundIntervalSeconds: numberFormValue(data, "roundIntervalSeconds", config.roundIntervalSeconds),
+    hitIntervalSeconds: numberFormValue(data, "roundIntervalSeconds", config.roundIntervalSeconds),
     missIntervalSeconds: numberFormValue(data, "missIntervalSeconds", config.missIntervalSeconds),
     userAgent: String(data.get("userAgent") || ""),
     shuffleProxies: data.has("shuffleProxies"),
