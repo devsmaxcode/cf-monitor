@@ -157,8 +157,11 @@ let reconnectTimer: number | null = null;
 let fallbackRefreshTimer: number | null = null;
 let nextRunTimer: number | null = null;
 let metricFilterTimer: number | null = null;
+let metricRuntimeRefreshTimer: number | null = null;
 let metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
 let metricRowsCache: { source: MetricRow[]; index: MetricRowsIndex } | null = null;
+let metricPayloadSignatureValue = "";
+let pendingMetricRuntimeRefresh = false;
 let dueRefreshForNextRun: string | null = null;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -181,6 +184,7 @@ async function loadAll() {
   metrics = nextMetrics;
   statusState = nextStatus;
   proxyText = proxies.text;
+  metricPayloadSignatureValue = metricPayloadSignature(metrics);
   render();
 }
 
@@ -240,11 +244,16 @@ function stopFallbackRefresh() {
 }
 
 function applyRuntime(nextMetrics: MetricsPayload, nextStatus: Status) {
+  const nextSignature = metricPayloadSignature(nextMetrics);
+  const metricsChanged = nextSignature !== metricPayloadSignatureValue;
   metrics = nextMetrics;
   statusState = nextStatus;
-  metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
-  metricRowsCache = null;
-  updateRuntimeView();
+  if (metricsChanged) {
+    metricPayloadSignatureValue = nextSignature;
+    metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
+    metricRowsCache = null;
+  }
+  updateRuntimeView(metricsChanged);
   syncNextRunTicker();
 }
 
@@ -310,7 +319,7 @@ function renderMetrics() {
   const pageGroups = groups.slice(pagination.start, pagination.end);
 
   return `
-    <section class="samples-panel">
+    <section class="samples-panel" data-metrics-view>
       <div class="table-filters">
         <label>
           Search
@@ -594,7 +603,7 @@ function renderLogs() {
   `;
 }
 
-function updateRuntimeView() {
+function updateRuntimeView(metricsChanged = true) {
   const statusChip = app.querySelector<HTMLElement>("[data-status-chip]");
   const statusDot = app.querySelector<HTMLElement>("[data-status-dot]");
   const statusText = app.querySelector<HTMLElement>("[data-status-label]");
@@ -611,12 +620,13 @@ function updateRuntimeView() {
   statusChip.classList.toggle("on", statusState.busy || statusState.running);
   statusDot.classList.toggle("on", statusState.busy || statusState.running);
   statusText.textContent = runtimeStatusLabel();
-  crawlProgress.innerHTML = renderCrawlProgress();
-  nextRunCountdown.innerHTML = renderNextRunCountdown();
-  actions.innerHTML = renderActionButtons();
-  wireActionEvents();
+  replaceHtml(crawlProgress, renderCrawlProgress());
+  replaceHtml(nextRunCountdown, renderNextRunCountdown());
+  if (replaceHtml(actions, renderActionButtons())) {
+    wireActionEvents();
+  }
 
-  if (activeTab === "proxies" && !formDirty) {
+  if (activeTab === "proxies" && !formDirty && metricsChanged) {
     const used = usedProxyRows();
     setText("[data-used-proxy-count]", `${used.length} recent`);
     setHtml("[data-used-proxies]", renderUsedProxyList(used));
@@ -630,7 +640,7 @@ function updateRuntimeView() {
     return;
   }
 
-  if (activeTab === "age") {
+  if (activeTab === "age" && metricsChanged) {
     setText("[data-age-timestamp]", metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "");
     setHtml("[data-age-list]", topAgeRows().map(renderAgeRow).join("") || '<div class="empty-state">No cache age data yet.</div>');
     return;
@@ -643,8 +653,65 @@ function updateRuntimeView() {
   }
 
   if (activeTab !== "metrics") return;
+  if (!metricsChanged) return;
 
+  scheduleMetricRuntimeUpdate();
+}
+
+function replaceHtml(element: HTMLElement, html: string) {
+  if (element.innerHTML === html) return false;
+  element.innerHTML = html;
+  return true;
+}
+
+function metricPayloadSignature(payload: MetricsPayload) {
+  const rounds = payload.rounds
+    .slice(0, 4)
+    .map((round) => `${round.id}:${round.status}:${round.total_rows}:${round.completed_at || ""}`)
+    .join("|");
+  return [
+    payload.summary.totalRows,
+    payload.summary.latestCells,
+    payload.summary.lastTimestamp || "",
+    payload.summary.totalRounds,
+    rounds,
+  ].join(";");
+}
+
+function scheduleMetricRuntimeUpdate() {
+  if (activeTab !== "metrics") {
+    pendingMetricRuntimeRefresh = false;
+    return;
+  }
+
+  pendingMetricRuntimeRefresh = true;
+  if (metricRuntimeRefreshTimer !== null) return;
+
+  const delay = statusState.busy ? 1200 : 0;
+  metricRuntimeRefreshTimer = window.setTimeout(flushMetricRuntimeUpdate, delay);
+}
+
+function flushMetricRuntimeUpdate() {
+  metricRuntimeRefreshTimer = null;
+
+  if (!pendingMetricRuntimeRefresh || activeTab !== "metrics") {
+    pendingMetricRuntimeRefresh = false;
+    return;
+  }
+
+  if (isMetricInteractionActive()) {
+    metricRuntimeRefreshTimer = window.setTimeout(flushMetricRuntimeUpdate, 600);
+    return;
+  }
+
+  pendingMetricRuntimeRefresh = false;
   updateMetricList();
+}
+
+function isMetricInteractionActive() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return false;
+  return Boolean(active.closest("[data-metrics-view]"));
 }
 
 function runtimeStatusLabel() {
