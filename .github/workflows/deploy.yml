@@ -99,7 +99,7 @@ jobs:
       - name: Install And Restart App
         run: |
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "sudo -i bash -s -- '$DEPLOY_PATH' '$APP_PORT' '$PM2_APP_NAME' '$DEPLOY_USER'" <<'EOF'
+            "sudo -Hiu root bash -s -- '$DEPLOY_PATH' '$APP_PORT' '$PM2_APP_NAME' '$DEPLOY_USER'" <<'EOF'
           set -euo pipefail
 
           DEPLOY_PATH="$1"
@@ -111,13 +111,14 @@ jobs:
           cd "$DEPLOY_PATH"
 
           command -v bun
-          command -v pm2
           command -v curl
+          command -v pm2
 
           bun install --production --frozen-lockfile
 
           export NODE_ENV=production
           export PORT="$APP_PORT"
+          export PM2_APP_NAME
           pm2 startOrReload ecosystem.config.cjs --update-env
           pm2 save
 

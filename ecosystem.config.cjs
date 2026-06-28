@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "cf-cache-monitor",
+      name: process.env.PM2_APP_NAME || "cf-cache-monitor",
       script: "./src/server.ts",
       interpreter: "bun",
       cwd: __dirname,
@@ -11,7 +11,7 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: "production",
-        PORT: "3033",
+        PORT: process.env.PORT || "3033",
       },
     },
   ],
