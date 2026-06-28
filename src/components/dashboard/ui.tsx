@@ -1,4 +1,5 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type { MonitorState } from '#/lib/monitor.server'
 import type { MetricRow } from './types'
 import { cacheStatus, countdown, statusTone } from './helpers'
@@ -14,9 +15,11 @@ export function RuntimeBadge({ status }: { status: MonitorState }) {
 }
 
 export function NextRun({ interval, status }: { interval: number; status: MonitorState }) {
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState<number | null>(null)
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const updateNow = () => setNow(Date.now())
+    updateNow()
+    const timer = window.setInterval(updateNow, 1000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -49,6 +52,8 @@ export function NextRun({ interval, status }: { interval: number; status: Monito
   }
 
   if (!status.nextRunAt || !status.running) return null
+  if (now === null) return null
+
   const seconds = Math.max(0, Math.round((Date.parse(status.nextRunAt) - now) / 1000))
   const progress = Math.max(0, Math.min(100, 100 - Math.round((seconds / interval) * 100)))
   return (

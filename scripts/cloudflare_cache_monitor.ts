@@ -175,7 +175,7 @@ function nonNegativeInteger(value: unknown, fallback: number) {
 }
 
 function usage(code: number): never {
-  console.log(`Usage: node cloudflare_cache_monitor.ts [options]
+  console.log(`Usage: node --experimental-strip-types cloudflare_cache_monitor.ts [options]
 
 Options:
   --pages pages.txt       full target URLs, default: ${DEFAULT_PAGES.length} common Ummah One URLs

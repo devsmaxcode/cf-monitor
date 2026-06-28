@@ -2,10 +2,10 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
-import { METRIC_RETENTION_DAYS } from './metric-range'
+import { METRIC_RETENTION_DAYS } from './metric-range.ts'
 
 export const DEFAULT_METRICS_DB = 'storage/cloudflare-cache-metrics.sqlite'
-export { METRIC_RETENTION_DAYS } from './metric-range'
+export { METRIC_RETENTION_DAYS } from './metric-range.ts'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')

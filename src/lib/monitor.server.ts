@@ -398,7 +398,7 @@ async function runMonitorRound(reason: string) {
       return { skipped: false }
     }
 
-    const args = monitorArgs(config, roundId, reason)
+    const args = monitorProcessArgs(config, roundId, reason)
     const started = new Date()
     state.lastRunAt = started.toISOString()
     pushLog(`[${started.toLocaleString()}] round ${roundId} started (${reason})`)
@@ -474,6 +474,14 @@ async function scheduleNextFromSavedConfig() {
   } catch (error) {
     pushLog(`schedule config read failed: ${errorMessage(error)}`)
   }
+}
+
+function monitorProcessArgs(config: Config, roundId: number, reason: string) {
+  return [
+    '--experimental-strip-types',
+    '--disable-warning=ExperimentalWarning',
+    ...monitorArgs(config, roundId, reason),
+  ]
 }
 
 function monitorArgs(config: Config, roundId: number, reason: string) {
