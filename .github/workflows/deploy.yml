@@ -1,0 +1,118 @@
+name: CI/CD - CF Monitor
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cf-monitor-production
+  cancel-in-progress: false
+
+env:
+  APP_PORT: ${{ vars.APP_PORT || '3033' }}
+  PM2_APP_NAME: ${{ vars.PM2_APP_NAME || 'cf-cache-monitor' }}
+  DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/irdfoundation-cf-monitor/htdocs/cf-monitor.irdfoundation.com' }}
+  APP_URL: ${{ vars.APP_URL || 'https://cf-monitor.irdfoundation.com' }}
+
+jobs:
+  ci:
+    name: Build Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+  deploy:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    needs: ci
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Deploy Config
+        run: |
+          : "${DEPLOY_HOST:?Missing DEPLOY_HOST secret}"
+          : "${DEPLOY_USER:?Missing DEPLOY_USER secret}"
+          : "${DEPLOY_SSH_KEY:?Missing DEPLOY_SSH_KEY secret}"
+          : "${DEPLOY_PATH:?Missing DEPLOY_PATH variable}"
+          : "${APP_PORT:?Missing APP_PORT variable}"
+          : "${PM2_APP_NAME:?Missing PM2_APP_NAME variable}"
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/id_rsa
+          sed -i 's/\r$//' ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Prepare Remote Directory
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/storage'"
+
+      - name: Sync Project Files
+        run: |
+          rsync -az --delete \
+            -e "ssh -p $DEPLOY_PORT" \
+            --exclude ".git/" \
+            --exclude ".github/" \
+            --exclude "node_modules/" \
+            --exclude "dist/" \
+            --exclude "storage/" \
+            --exclude "*.log" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      - name: Bootstrap Storage Defaults
+        run: |
+          rsync -az --ignore-existing \
+            -e "ssh -p $DEPLOY_PORT" \
+            --include "storage/" \
+            --include "storage/*.json" \
+            --include "storage/*.txt" \
+            --exclude "*" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      - name: Install And Restart App
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' APP_PORT='$APP_PORT' PM2_APP_NAME='$PM2_APP_NAME' bash -s" <<'EOF'
+          set -euo pipefail
+
+          export PATH="$HOME/.bun/bin:/root/.bun/bin:$PATH"
+          cd "$DEPLOY_PATH"
+
+          command -v bun
+          command -v pm2
+          command -v curl
+
+          bun install --production --frozen-lockfile
+
+          export NODE_ENV=production
+          export PORT="$APP_PORT"
+          pm2 startOrReload ecosystem.config.cjs --update-env
+          pm2 save
+
+          pm2 describe "$PM2_APP_NAME" >/dev/null
+          curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/" >/dev/null
+          EOF
+
+      - name: Public Health Check
+        run: curl --fail --silent --show-error "$APP_URL/" >/dev/null
