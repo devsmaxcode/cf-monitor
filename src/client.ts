@@ -37,6 +37,9 @@ type MetricTimeColumn = {
   sort: number;
 };
 
+const metricRangeDayOptions = [1, 7, 10] as const;
+type MetricRangeDays = (typeof metricRangeDayOptions)[number];
+
 type MetricRound = {
   id: number;
   status: "running" | "completed" | "failed" | "stopped";
@@ -73,7 +76,41 @@ type MetricRowsIndex = {
   statuses: string[];
 };
 
+type CacheAgeBucket = {
+  key: string;
+  label: string;
+  meta: string;
+  sort: number;
+  total: number;
+  useful: number;
+  hits: number;
+  missLike: number;
+  noHeader: number;
+  errors: number;
+  ageValues: number[];
+  avgAge: number;
+  maxAge: number;
+  hitRate: number;
+};
+
+type TopHitUrl = {
+  url: string;
+  hits: number;
+  useful: number;
+  total: number;
+  hitRate: number;
+  maxAge: number;
+  avgAge: number;
+  latestTimestamp: string;
+};
+
 type MetricsPayload = {
+  range?: {
+    days: MetricRangeDays;
+    sinceIso: string;
+    availableFrom: string | null;
+    availableTo: string | null;
+  };
   rounds: MetricRound[];
   latestRows: MetricRow[];
   pageStats: {
@@ -132,6 +169,9 @@ type RuntimeMessage = {
 };
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+const METRIC_RANGE_STORAGE_KEY = "cf-monitor-range-days";
+const ROUND_TIMEFRAME_STORAGE_KEY = "cf-monitor.roundTimeframeDays";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -141,6 +181,7 @@ let statusState: Status;
 let proxyText = "";
 let activeTab: "metrics" | "rounds" | "config" | "proxies" | "logs" | "age" = "metrics";
 let selectedRoundId: number | null = null;
+let selectedMetricRangeDays: MetricRangeDays = storedMetricRangeDays();
 let formDirty = false;
 let metricFilters = {
   query: "",
@@ -176,7 +217,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 async function loadAll() {
   const [nextConfig, nextMetrics, nextStatus, proxies] = await Promise.all([
     api<Config>("/api/config"),
-    api<MetricsPayload>("/api/metrics"),
+    api<MetricsPayload>(metricsApiPath()),
     api<Status>("/api/status"),
     api<{ text: string }>("/api/proxies"),
   ]);
@@ -189,8 +230,12 @@ async function loadAll() {
 }
 
 async function refreshRuntime() {
-  const [nextMetrics, nextStatus] = await Promise.all([api<MetricsPayload>("/api/metrics"), api<Status>("/api/status")]);
+  const [nextMetrics, nextStatus] = await Promise.all([api<MetricsPayload>(metricsApiPath()), api<Status>("/api/status")]);
   applyRuntime(nextMetrics, nextStatus);
+}
+
+function metricsApiPath() {
+  return `/api/metrics?days=${selectedMetricRangeDays}`;
 }
 
 function connectLiveUpdates() {
@@ -205,6 +250,11 @@ function connectLiveUpdates() {
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(String(event.data)) as RuntimeMessage;
     if (message.type !== "runtime") return;
+    if (message.metrics.range && message.metrics.range.days !== selectedMetricRangeDays) {
+      applyStatusOnly(message.status);
+      refreshRuntime().catch(console.error);
+      return;
+    }
     applyRuntime(message.metrics, message.status);
   });
 
@@ -257,8 +307,43 @@ function applyRuntime(nextMetrics: MetricsPayload, nextStatus: Status) {
   syncNextRunTicker();
 }
 
-function topAgeRows() {
-  return [...metrics.pageStats].sort((a, b) => b.maxAge - a.maxAge).slice(0, 12);
+function applyStatusOnly(nextStatus: Status) {
+  statusState = nextStatus;
+  updateRuntimeView(false);
+  syncNextRunTicker();
+}
+
+function storedMetricRangeDays(): MetricRangeDays {
+  try {
+    const storedValue = localStorage.getItem(ROUND_TIMEFRAME_STORAGE_KEY) ?? localStorage.getItem(METRIC_RANGE_STORAGE_KEY);
+    const value = Number(storedValue);
+    return isMetricRangeDays(value) ? value : 10;
+  } catch {
+    return 10;
+  }
+}
+
+function setMetricRangeDays(days: MetricRangeDays) {
+  if (selectedMetricRangeDays === days) return;
+  selectedMetricRangeDays = days;
+  selectedRoundId = null;
+  metricColumnCache = new WeakMap<MetricRow, MetricTimeColumn>();
+  metricRowsCache = null;
+  try {
+    localStorage.setItem(METRIC_RANGE_STORAGE_KEY, String(days));
+    localStorage.setItem(ROUND_TIMEFRAME_STORAGE_KEY, String(days));
+  } catch {
+    // Storage can be unavailable in private or locked-down browser contexts.
+  }
+  if (activeTab === "rounds") {
+    setHtml("[data-rounds-view]", renderRoundsContent());
+    wireRoundEvents();
+  }
+  refreshRuntime().catch(console.error);
+}
+
+function isMetricRangeDays(value: number): value is MetricRangeDays {
+  return metricRangeDayOptions.includes(value as MetricRangeDays);
 }
 
 function setText(selector: string, value: string) {
@@ -325,6 +410,7 @@ function renderMetrics() {
           Search
           <input data-filter="query" value="${escapeAttr(metricFilters.query)}" placeholder="URL, edge, proxy, error..." />
         </label>
+        ${renderMetricRangeControl()}
         <label>
           Page
           <select data-filter="page">
@@ -370,10 +456,10 @@ function renderAge() {
     <section class="side-panel cache-age-panel">
       <div class="section-head">
         <h2><span class="section-icon" aria-hidden="true">${icon("clock")}</span>Cache Age</h2>
-        <span data-age-timestamp>${metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : ""}</span>
+        <span data-age-timestamp>${escapeHtml(ageRangeLabel())}</span>
       </div>
-      <div class="age-list" data-age-list>
-        ${topAgeRows().map(renderAgeRow).join("") || '<div class="empty-state">No cache age data yet.</div>'}
+      <div class="cache-age-dashboard" data-age-dashboard>
+        ${renderAgeDashboard()}
       </div>
     </section>
   `;
@@ -384,8 +470,9 @@ function renderRounds() {
 }
 
 function renderRoundsContent() {
-  const stats = roundStats();
-  const selected = selectedRound();
+  const rounds = roundsInSelectedRange();
+  const stats = roundStats(rounds);
+  const selected = selectedRound(rounds);
 
   return `
     <div class="rounds-hero">
@@ -396,9 +483,11 @@ function renderRoundsContent() {
           <p>${escapeHtml(roundsSubtitle(stats))}</p>
         </div>
       </div>
-      <div class="rounds-live ${statusState.busy ? "active" : statusState.running ? "armed" : ""}">
-        <span aria-hidden="true"></span>
-        <strong>${escapeHtml(roundsLiveLabel())}</strong>
+      <div class="rounds-hero-actions">
+        <div class="rounds-live ${statusState.busy ? "active" : statusState.running ? "armed" : ""}">
+          <span aria-hidden="true"></span>
+          <strong>${escapeHtml(roundsLiveLabel())}</strong>
+        </div>
       </div>
     </div>
 
@@ -406,10 +495,10 @@ function renderRoundsContent() {
       <div class="rounds-list-wrap">
         <div class="rounds-list-head">
           <h3>All Rounds</h3>
-          <span>${metrics.rounds.length ? `${metrics.rounds.length} retained` : "Empty"}</span>
+          <span>${roundsListMeta(rounds.length)}</span>
         </div>
         <div class="rounds-list" data-round-list>
-          ${metrics.rounds.length ? metrics.rounds.map((round) => renderRoundItem(round, selected?.id || null)).join("") : '<div class="empty-state">No rounds recorded yet.</div>'}
+          ${rounds.length ? rounds.map((round) => renderRoundItem(round, selected?.id || null)).join("") : renderRoundsEmptyState()}
         </div>
       </div>
 
@@ -502,8 +591,7 @@ function renderRoundStatus(status: MetricRound["status"]) {
   return `<span class="round-status ${status}">${escapeHtml(roundStatusLabel(status))}</span>`;
 }
 
-function roundStats() {
-  const rounds = metrics.rounds;
+function roundStats(rounds = roundsInSelectedRange()) {
   const total = rounds.length;
   const rows = rounds.reduce((sum, round) => sum + round.total_rows, 0);
   const maxRows = Math.max(0, ...rounds.map((round) => round.total_rows));
@@ -511,19 +599,20 @@ function roundStats() {
   return {
     latest: rounds[0] || null,
     maxRows,
+    retained: metrics.rounds.length,
     rows,
     total,
   };
 }
 
-function selectedRound() {
-  if (!metrics.rounds.length) {
+function selectedRound(rounds = roundsInSelectedRange()) {
+  if (!rounds.length) {
     selectedRoundId = null;
     return null;
   }
 
-  const selected = selectedRoundId ? metrics.rounds.find((round) => round.id === selectedRoundId) : null;
-  const round = selected || metrics.rounds[0];
+  const selected = selectedRoundId ? rounds.find((round) => round.id === selectedRoundId) : null;
+  const round = selected || rounds[0];
   selectedRoundId = round.id;
   return round;
 }
@@ -564,10 +653,41 @@ function roundProfile(round: MetricRound) {
 }
 
 function roundsSubtitle(stats: ReturnType<typeof roundStats>) {
-  if (!stats.total) return "No rounds yet. Start the monitor to build a run history.";
+  const range = metricRangeLabel().toLowerCase();
+  if (!stats.retained) return "No rounds yet. Start the monitor to build a run history.";
+  if (!stats.total) return `No rounds in ${range}; ${stats.retained} retained outside this window.`;
   const latest = stats.latest;
   const latestText = latest?.started_at ? `latest ${relativeTime(latest.started_at)}` : "latest saved";
-  return `${stats.total} retained rounds, ${compactNumber(stats.rows)} rows, ${latestText}`;
+  return `${stats.total} rounds in ${range}, ${compactNumber(stats.rows)} rows, ${latestText}`;
+}
+
+function roundsListMeta(count: number) {
+  if (!metrics.rounds.length) return "Empty";
+  return `${count} shown / ${metrics.rounds.length} retained`;
+}
+
+function renderRoundsEmptyState() {
+  if (!metrics.rounds.length) return '<div class="empty-state">No rounds recorded yet.</div>';
+  return `<div class="empty-state">No rounds in ${escapeHtml(metricRangeLabel().toLowerCase())}.</div>`;
+}
+
+function roundsInSelectedRange() {
+  const cutoff = Date.now() - selectedMetricRangeDays * DAY_MS;
+  return metrics.rounds.filter((round) => {
+    if (round.status === "running") return true;
+    const time = roundTime(round);
+    return time === null || time >= cutoff;
+  });
+}
+
+function roundTime(round: MetricRound) {
+  const value = round.started_at || round.completed_at || round.created_at;
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? time : null;
+}
+
+function metricRangeLabel(days = selectedMetricRangeDays) {
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 function roundsLiveLabel() {
@@ -641,8 +761,8 @@ function updateRuntimeView(metricsChanged = true) {
   }
 
   if (activeTab === "age" && metricsChanged) {
-    setText("[data-age-timestamp]", metrics.summary.lastTimestamp ? shortDate(metrics.summary.lastTimestamp) : "");
-    setHtml("[data-age-list]", topAgeRows().map(renderAgeRow).join("") || '<div class="empty-state">No cache age data yet.</div>');
+    setText("[data-age-timestamp]", ageRangeLabel());
+    setHtml("[data-age-dashboard]", renderAgeDashboard());
     return;
   }
 
@@ -670,6 +790,7 @@ function metricPayloadSignature(payload: MetricsPayload) {
     .map((round) => `${round.id}:${round.status}:${round.total_rows}:${round.completed_at || ""}`)
     .join("|");
   return [
+    payload.range?.days || "",
     payload.summary.totalRows,
     payload.summary.latestCells,
     payload.summary.lastTimestamp || "",
@@ -1138,19 +1259,335 @@ function renderEmptyListRow(columns: MetricTimeColumn[] = []) {
   return emptyTableRow("No samples match the current filters.", Math.max(2 + columns.length, 3));
 }
 
-function renderAgeRow(row: MetricsPayload["pageStats"][number]) {
-  const max = Math.max(metrics.summary.maxAge, 1);
-  const width = Math.max(2, Math.round((row.maxAge / max) * 100));
-  const hitRatio = row.total ? Math.round((row.hitCount / row.total) * 100) : 0;
+function renderAgeDashboard() {
+  const buckets = cacheAgeBuckets();
+  if (!metrics.rows.length || !buckets.length) {
+    return `<div class="empty-state">No cache age data yet.</div>`;
+  }
+
+  const summary = cacheAgeSummary(buckets);
+  const topUrls = topHitUrls();
+
   return `
-    <div class="age-row">
-      <div>
-        <strong>${escapeHtml(row.page)}</strong>
-        <span>${duration(row.maxAge)} &middot; ${hitRatio}% HIT</span>
+    <div class="age-summary-grid">
+      ${renderAgeStat("HIT Rate", `${summary.hitRate}%`, `${compactNumber(summary.hits)} HIT / ${compactNumber(summary.useful)} useful`, "hit")}
+      ${renderAgeStat("Max Age", duration(summary.maxAge), `${duration(summary.avgAge)} average`, "age")}
+      ${renderAgeStat("MISS-like", compactNumber(summary.missLike), "BYPASS, MISS, EXPIRED and similar", "miss")}
+      ${renderAgeStat(
+        "No Header / Errors",
+        compactNumber(summary.noHeader + summary.errors),
+        `${compactNumber(summary.noHeader)} no header, ${compactNumber(summary.errors)} errors`,
+        "warn",
+      )}
+    </div>
+
+    <div class="age-chart-grid">
+      <section class="age-chart-card">
+        <div class="age-chart-head">
+          <h3>Cache Status Over Time</h3>
+          <span>${escapeHtml(`${buckets.length} time points`)}</span>
+        </div>
+        ${renderCacheStatusBars(buckets)}
+        ${renderAgeLegend()}
+      </section>
+
+      <section class="age-chart-card">
+        <div class="age-chart-head">
+          <h3>Cache Age Trend</h3>
+          <span>${escapeHtml(`Peak ${duration(summary.maxAge)}`)}</span>
+        </div>
+        ${renderAgeLineChart(buckets)}
+      </section>
+    </div>
+
+    <section class="age-chart-card age-top-card">
+      <div class="age-chart-head">
+        <h3>Top HIT URLs</h3>
+        <span>${escapeHtml(topUrls.length ? `${topUrls.length} URLs` : "No HIT data")}</span>
       </div>
-      <div class="bar"><i style="width:${width}%"></i></div>
+      ${renderTopHitUrlChart(topUrls)}
+    </section>
+  `;
+}
+
+function renderAgeStat(label: string, value: string, meta: string, tone: string) {
+  return `
+    <div class="age-stat ${tone}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(meta)}</small>
     </div>
   `;
+}
+
+function renderCacheStatusBars(buckets: CacheAgeBucket[]) {
+  const visible = buckets.slice(-40);
+  const maxTotal = Math.max(1, ...visible.map((bucket) => bucket.total));
+
+  return `
+    <div class="age-status-chart">
+      ${visible
+        .map((bucket) => {
+          const height = Math.max(10, Math.round((bucket.total / maxTotal) * 100));
+          return `
+            <div class="age-status-column" title="${escapeAttr(ageBucketTitle(bucket))}">
+              <div class="age-status-stack" style="height:${height}%">
+                <i class="hit" style="height:${ageSegmentHeight(bucket.hits, bucket.total)}%"></i>
+                <i class="miss" style="height:${ageSegmentHeight(bucket.missLike, bucket.total)}%"></i>
+                <i class="warn" style="height:${ageSegmentHeight(bucket.noHeader, bucket.total)}%"></i>
+                <i class="fail" style="height:${ageSegmentHeight(bucket.errors, bucket.total)}%"></i>
+              </div>
+              <span>${escapeHtml(bucket.label)}</span>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderAgeLegend() {
+  return `
+    <div class="age-legend">
+      <span><i class="hit"></i>HIT</span>
+      <span><i class="miss"></i>MISS-like</span>
+      <span><i class="warn"></i>No header</span>
+      <span><i class="fail"></i>Error</span>
+    </div>
+  `;
+}
+
+function renderAgeLineChart(buckets: CacheAgeBucket[]) {
+  const visible = buckets.slice(-40);
+  const width = 720;
+  const height = 190;
+  const pad = 24;
+  const maxAge = Math.max(1, ...visible.map((bucket) => bucket.maxAge));
+  const points = visible.map((bucket, index) => {
+    const x = visible.length === 1 ? width / 2 : pad + (index / (visible.length - 1)) * (width - pad * 2);
+    const y = height - pad - (bucket.maxAge / maxAge) * (height - pad * 2);
+    return { bucket, x: Math.round(x), y: Math.round(y) };
+  });
+  const line = points.map((point) => `${point.x},${point.y}`).join(" ");
+  const area = points.length
+    ? `M ${points[0].x} ${height - pad} L ${points.map((point) => `${point.x} ${point.y}`).join(" L ")} L ${
+        points.at(-1)!.x
+      } ${height - pad} Z`
+    : "";
+
+  return `
+    <div class="age-line-wrap">
+      <svg class="age-line-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Cache age over time">
+        <path class="age-line-grid" d="M ${pad} ${height - pad} H ${width - pad} M ${pad} ${pad} H ${width - pad}" />
+        ${area ? `<path class="age-line-area" d="${area}" />` : ""}
+        ${line ? `<polyline class="age-line" points="${line}" />` : ""}
+        ${points
+          .map(
+            (point) =>
+              `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${escapeHtml(
+                `${point.bucket.label}: ${duration(point.bucket.maxAge)} max age`,
+              )}</title></circle>`,
+          )
+          .join("")}
+      </svg>
+      <div class="age-line-meta">
+        <span>${escapeHtml(visible[0]?.meta || "-")}</span>
+        <strong>${escapeHtml(duration(maxAge))}</strong>
+        <span>${escapeHtml(visible.at(-1)?.meta || "-")}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderTopHitUrlChart(rows: TopHitUrl[]) {
+  if (!rows.length) return `<div class="empty-state compact">No HIT rows found in this timeframe.</div>`;
+  const maxHits = Math.max(1, ...rows.map((row) => row.hits));
+  return `
+    <div class="top-hit-chart">
+      ${rows
+        .map((row) => {
+          const width = Math.max(3, Math.round((row.hits / maxHits) * 100));
+          return `
+            <div class="top-hit-row" title="${escapeAttr(row.url)}">
+              <div class="top-hit-copy">
+                <strong>${escapeHtml(compactUrl(row.url))}</strong>
+                <span>${escapeHtml(`${compactNumber(row.hits)} HIT / ${compactNumber(row.useful)} useful - ${row.hitRate}% HIT - max age ${duration(row.maxAge)}`)}</span>
+              </div>
+              <b>${escapeHtml(`${row.hitRate}%`)}</b>
+              <div class="top-hit-bar"><i style="width:${width}%"></i></div>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function cacheAgeBuckets() {
+  const buckets = new Map<string, CacheAgeBucket>();
+
+  for (const row of metrics.rows) {
+    const time = Date.parse(row.timestamp_utc || "");
+    const round = metricRoundBase(row.round_id || row.round || "");
+    const fallbackKey = Number.isNaN(time) ? "unknown" : new Date(time).toISOString().slice(0, 13);
+    const key = round ? `round-${round}` : fallbackKey;
+    let bucket = buckets.get(key);
+
+    if (!bucket) {
+      const date = Number.isNaN(time) ? null : new Date(time);
+      bucket = {
+        key,
+        label: round ? `R${round}` : date ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "-",
+        meta: date ? shortDate(date.toISOString()) : "No time",
+        sort: Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time,
+        total: 0,
+        useful: 0,
+        hits: 0,
+        missLike: 0,
+        noHeader: 0,
+        errors: 0,
+        ageValues: [],
+        avgAge: 0,
+        maxAge: 0,
+        hitRate: 0,
+      };
+      buckets.set(key, bucket);
+    }
+
+    const status = cacheStatus(row);
+    const age = Number(row.age_seconds) || 0;
+    bucket.total += 1;
+    bucket.sort = Math.min(bucket.sort, Number.isNaN(time) ? bucket.sort : time);
+
+    if (row.error || status === "FAIL") {
+      bucket.errors += 1;
+    } else if (!row.cf_cache_status) {
+      bucket.noHeader += 1;
+    } else {
+      bucket.useful += 1;
+      if (status === "HIT") bucket.hits += 1;
+      else if (isMissLike(status)) bucket.missLike += 1;
+    }
+
+    if (status === "HIT" && age > 0) bucket.ageValues.push(age);
+  }
+
+  return [...buckets.values()]
+    .map(finalizeAgeBucket)
+    .sort((a, b) => a.sort - b.sort);
+}
+
+function finalizeAgeBucket(bucket: CacheAgeBucket) {
+  bucket.maxAge = Math.max(0, ...bucket.ageValues);
+  bucket.avgAge = averageNumber(bucket.ageValues);
+  bucket.hitRate = bucket.useful ? Math.round((bucket.hits / bucket.useful) * 100) : 0;
+  return bucket;
+}
+
+function cacheAgeSummary(buckets: CacheAgeBucket[]) {
+  const ageValues = buckets.flatMap((bucket) => bucket.ageValues);
+  const hits = buckets.reduce((sum, bucket) => sum + bucket.hits, 0);
+  const useful = buckets.reduce((sum, bucket) => sum + bucket.useful, 0);
+  return {
+    avgAge: averageNumber(ageValues),
+    errors: buckets.reduce((sum, bucket) => sum + bucket.errors, 0),
+    hitRate: useful ? Math.round((hits / useful) * 100) : 0,
+    hits,
+    maxAge: Math.max(0, ...ageValues),
+    missLike: buckets.reduce((sum, bucket) => sum + bucket.missLike, 0),
+    noHeader: buckets.reduce((sum, bucket) => sum + bucket.noHeader, 0),
+    useful,
+  };
+}
+
+function topHitUrls() {
+  const urls = new Map<string, TopHitUrl & { ageValues: number[] }>();
+
+  for (const row of metrics.rows) {
+    const url = row.url || row.page || "-";
+    const status = cacheStatus(row);
+    const age = Number(row.age_seconds) || 0;
+    let item = urls.get(url);
+    if (!item) {
+      item = { url, hits: 0, useful: 0, total: 0, hitRate: 0, maxAge: 0, avgAge: 0, latestTimestamp: "", ageValues: [] };
+      urls.set(url, item);
+    }
+
+    item.total += 1;
+    if (row.cf_cache_status) item.useful += 1;
+    if (status === "HIT") {
+      item.hits += 1;
+      if (age > 0) item.ageValues.push(age);
+    }
+    if (!item.latestTimestamp || Date.parse(row.timestamp_utc || "") > Date.parse(item.latestTimestamp)) {
+      item.latestTimestamp = row.timestamp_utc || "";
+    }
+  }
+
+  return [...urls.values()]
+    .map(({ ageValues, ...item }) => ({
+      ...item,
+      avgAge: averageNumber(ageValues),
+      hitRate: item.useful ? Math.round((item.hits / item.useful) * 100) : 0,
+      maxAge: Math.max(0, ...ageValues),
+    }))
+    .filter((item) => item.hits > 0)
+    .sort((a, b) => b.hits - a.hits || b.hitRate - a.hitRate || b.maxAge - a.maxAge)
+    .slice(0, 10);
+}
+
+function ageSegmentHeight(count: number, total: number) {
+  return total ? Math.round((count / total) * 100) : 0;
+}
+
+function ageBucketTitle(bucket: CacheAgeBucket) {
+  return [
+    `${bucket.label} (${bucket.meta})`,
+    `${bucket.hitRate}% HIT`,
+    `${bucket.hits} HIT`,
+    `${bucket.missLike} MISS-like`,
+    `${bucket.noHeader} no header`,
+    `${bucket.errors} errors`,
+  ].join(" - ");
+}
+
+function ageRangeLabel() {
+  const updated = metrics.range?.availableTo || metrics.summary.lastTimestamp;
+  const availableFrom = metrics.range?.availableFrom;
+  if (!updated) return `${metricRangeLabel()} - No data`;
+  const available = availableFrom ? `${shortDate(availableFrom)} to ${shortDate(updated)}` : shortDate(updated);
+  return `${metricRangeLabel()} - ${available}`;
+}
+
+function renderMetricRangeControl() {
+  return `
+    <label class="metric-range-control">
+      <span>Timeframe</span>
+      <select data-metric-range aria-label="Round timeframe">
+        ${metricRangeDayOptions
+          .map((days) => `<option value="${days}" ${selectedMetricRangeDays === days ? "selected" : ""}>${metricRangeLabel(days)}</option>`)
+          .join("")}
+      </select>
+    </label>
+  `;
+}
+
+function compactUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return `${url.hostname}${url.pathname === "/" ? "/" : url.pathname}`;
+  } catch {
+    return value || "-";
+  }
+}
+
+function wireMetricRangeEvents() {
+  app.querySelectorAll<HTMLSelectElement>("[data-metric-range]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const days = Number(select.value);
+      if (isMetricRangeDays(days)) setMetricRangeDays(days);
+    });
+  });
 }
 
 function renderConfig() {
@@ -1399,6 +1836,7 @@ function proxyKey(value: string) {
 
 function wireEvents() {
   wireActionEvents();
+  wireMetricRangeEvents();
 
   app.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {

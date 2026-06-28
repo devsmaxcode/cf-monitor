@@ -5,9 +5,11 @@ import {
   createMetricRound,
   DEFAULT_METRICS_DB,
   finalizeMetricRound,
+  METRIC_RETENTION_DAYS,
   normalizeMetricsOutput,
   readMetricRows,
   readMetricRounds,
+  type MetricDateRange,
   type MetricRow,
 } from "./metrics-db";
 
@@ -56,6 +58,15 @@ type CrawlProgress = {
   activeUrl: string | null;
 };
 
+const metricRangeDayOptions = [1, 7, METRIC_RETENTION_DAYS] as const;
+type MetricRangeDays = (typeof metricRangeDayOptions)[number];
+
+type MetricRangeInput = MetricDateRange & {
+  days: MetricRangeDays;
+  sinceIso: string;
+};
+
+const metricDayMs = 24 * 60 * 60 * 1000;
 const root = join(import.meta.dir, "..");
 const storageDir = join(root, "storage");
 const configPath = join(storageDir, "dashboard-config.json");
@@ -528,9 +539,9 @@ async function scheduleNext(config: Config) {
   }, Math.max(0, next.getTime() - Date.now()));
 }
 
-async function buildMetrics(config: Config) {
-  const rows = await readMetricRows(config.output, root);
-  const rounds = await readMetricRounds(config.output, root);
+async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION_DAYS)) {
+  const rows = await readMetricRows(config.output, root, { sinceIso: range.sinceIso });
+  const rounds = await readMetricRounds(config.output, root, { sinceIso: range.sinceIso });
   const timeColumns = metricTimeColumns(rows);
   const latest = new Map<string, MetricRow>();
 
@@ -584,7 +595,42 @@ async function buildMetrics(config: Config) {
     lastTimestamp: rows.at(-1)?.timestamp_utc || null,
   };
 
-  return { rows, rounds, latestRows, countries, pages, pageStats, matrix, timeColumns, summary };
+  return {
+    rows,
+    rounds,
+    latestRows,
+    countries,
+    pages,
+    pageStats,
+    matrix,
+    timeColumns,
+    summary,
+    range: {
+      ...range,
+      availableFrom: rows[0]?.timestamp_utc || rounds.at(-1)?.started_at || null,
+      availableTo: rows.at(-1)?.timestamp_utc || rounds[0]?.completed_at || rounds[0]?.started_at || null,
+    },
+  };
+}
+
+function metricRangeFromRequest(req: Request) {
+  const raw = new URL(req.url).searchParams.get("days")?.trim();
+  if (!raw) return metricRange(METRIC_RETENTION_DAYS);
+
+  const value = Number(raw);
+  if (raw !== String(value) || !isMetricRangeDays(value)) return null;
+  return metricRange(value);
+}
+
+function metricRange(days: MetricRangeDays): MetricRangeInput {
+  return {
+    days,
+    sinceIso: new Date(Date.now() - days * metricDayMs).toISOString(),
+  };
+}
+
+function isMetricRangeDays(value: number): value is MetricRangeDays {
+  return metricRangeDayOptions.includes(value as MetricRangeDays);
 }
 
 function metricTimeColumns(rows: MetricRow[]) {
@@ -701,9 +747,12 @@ const server = Bun.serve({
       },
     },
     "/api/metrics": {
-      async GET() {
+      async GET(req) {
+        const range = metricRangeFromRequest(req);
+        if (!range) return json({ error: "days must be one of: 1, 7, 10" }, 400);
+
         const config = await readConfig();
-        return json(await buildMetrics(config));
+        return json(await buildMetrics(config, range));
       },
     },
     "/api/proxies": {

@@ -4,8 +4,9 @@ import { SQL } from "bun";
 
 export const DEFAULT_METRICS_DB = "storage/cloudflare-cache-metrics.sqlite";
 
-// Change this value to keep more or fewer completed database rounds.
-export const METRIC_ROUND_RETENTION = 10;
+// Keep enough history for the largest dashboard timeframe.
+export const METRIC_RETENTION_DAYS = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const METRIC_FIELDS = [
   "round_id",
@@ -60,6 +61,11 @@ type FinalizeMetricRoundInput = {
   totalRows?: number;
   recheckRows?: number;
   error?: string;
+};
+
+export type MetricDateRange = {
+  sinceIso?: string;
+  untilIso?: string;
 };
 
 export function normalizeMetricsOutput(output?: string) {
@@ -117,15 +123,19 @@ export async function appendMetricRows(output: string, rows: MetricRow[], baseDi
   }
 }
 
-export async function readMetricRows(output: string, baseDir = process.cwd()) {
+export async function readMetricRows(output: string, baseDir = process.cwd(), dateRange: MetricDateRange = {}) {
   const sql = await openMetricsDb(output, baseDir);
   try {
+    const range = normalizeMetricDateRange(dateRange);
     const rows = await sql`
       SELECT
         round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
         cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
         content_length, content_type, cache_control, server, error
       FROM cache_metrics
+      WHERE
+        (${range.sinceIso} IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(${range.sinceIso})))
+        AND (${range.untilIso} IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(${range.untilIso})))
       ORDER BY id ASC
     `;
 
@@ -204,7 +214,7 @@ export async function finalizeMetricRound(
           recheck_rows, page_count, proxy_country_count, config_json, error, created_at
       `;
       finalized = metricRoundFromDb(row);
-      await pruneOldMetricRounds(tx, METRIC_ROUND_RETENTION);
+      await pruneOldMetricRounds(tx, METRIC_RETENTION_DAYS);
     });
 
     return finalized;
@@ -215,25 +225,36 @@ export async function finalizeMetricRound(
 
 export async function applyMetricRoundRetention(
   output: string,
-  keepRounds = METRIC_ROUND_RETENTION,
+  keepDays = METRIC_RETENTION_DAYS,
   baseDir = process.cwd(),
 ) {
   const sql = await openMetricsDb(output, baseDir);
   try {
-    await sql.begin((tx) => pruneOldMetricRounds(tx, keepRounds));
+    await sql.begin((tx) => pruneOldMetricRounds(tx, keepDays));
   } finally {
     await sql.close();
   }
 }
 
-export async function readMetricRounds(output: string, baseDir = process.cwd()) {
+export async function readMetricRounds(output: string, baseDir = process.cwd(), dateRange: MetricDateRange = {}) {
   const sql = await openMetricsDb(output, baseDir);
   try {
+    const range = normalizeMetricDateRange(dateRange);
     const rows = await sql`
       SELECT
         id, status, reason, started_at, completed_at, duration_ms, total_rows,
         recheck_rows, page_count, proxy_country_count, config_json, error, created_at
       FROM cache_rounds
+      WHERE
+        (
+          ${range.sinceIso} IS NULL
+          OR status = ${"running"}
+          OR datetime(COALESCE(NULLIF(completed_at, ''), NULLIF(started_at, ''), NULLIF(created_at, ''))) >= datetime(${range.sinceIso})
+        )
+        AND (
+          ${range.untilIso} IS NULL
+          OR datetime(COALESCE(NULLIF(started_at, ''), NULLIF(created_at, ''), NULLIF(completed_at, ''))) <= datetime(${range.untilIso})
+        )
       ORDER BY id DESC
     `;
     return rows.map(metricRoundFromDb);
@@ -371,27 +392,30 @@ async function metricRoundCounts(sql: SQL, roundId: number) {
   };
 }
 
-async function pruneOldMetricRounds(sql: SQL, keepRounds: number) {
-  const keep = integer(keepRounds);
+async function pruneOldMetricRounds(sql: SQL, keepDays: number) {
+  const keep = integer(keepDays, METRIC_RETENTION_DAYS);
   if (keep <= 0) return;
 
-  const [cutoff] = await sql`
-    SELECT id
-    FROM cache_rounds
-    ORDER BY id DESC
-    LIMIT 1 OFFSET ${keep - 1}
-  `;
-  const cutoffId = integer((cutoff as Record<string, unknown> | undefined)?.id);
-  if (!cutoffId) return;
+  const cutoffIso = new Date(Date.now() - keep * DAY_MS).toISOString();
 
   await sql`
     DELETE FROM cache_metrics
-    WHERE round_id > 0
-      AND round_id < ${cutoffId}
+    WHERE round_id IN (
+      SELECT id
+      FROM cache_rounds
+      WHERE status <> ${"running"}
+        AND datetime(COALESCE(NULLIF(completed_at, ''), NULLIF(started_at, ''), NULLIF(created_at, ''))) < datetime(${cutoffIso})
+    )
+  `;
+  await sql`
+    DELETE FROM cache_metrics
+    WHERE timestamp_utc <> ''
+      AND datetime(timestamp_utc) < datetime(${cutoffIso})
   `;
   await sql`
     DELETE FROM cache_rounds
-    WHERE id < ${cutoffId}
+    WHERE status <> ${"running"}
+      AND datetime(COALESCE(NULLIF(completed_at, ''), NULLIF(started_at, ''), NULLIF(created_at, ''))) < datetime(${cutoffIso})
   `;
 }
 
@@ -423,6 +447,20 @@ function metricRoundStatus(input: unknown): MetricRoundStatus {
 
 function metricRoundId(row: MetricRow) {
   return integer(row.round_id);
+}
+
+function normalizeMetricDateRange(range: MetricDateRange) {
+  return {
+    sinceIso: isoOrNull(range.sinceIso),
+    untilIso: isoOrNull(range.untilIso),
+  };
+}
+
+function isoOrNull(input: unknown) {
+  const raw = value(input).trim();
+  if (!raw) return null;
+  const time = Date.parse(raw);
+  return Number.isNaN(time) ? null : new Date(time).toISOString();
 }
 
 function integer(input: unknown, fallback = 0) {
