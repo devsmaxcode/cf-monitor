@@ -12,6 +12,7 @@ env:
   PM2_APP_NAME: ${{ vars.PM2_APP_NAME || 'cf-cache-monitor' }}
   DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/irdfoundation-cf-monitor/htdocs/cf-monitor.irdfoundation.com' }}
   APP_URL: ${{ vars.APP_URL || 'https://cf-monitor.irdfoundation.com' }}
+  METRICS_DB_FILE: storage/cloudflare-cache-metrics.sqlite
 
 jobs:
   ci:
@@ -54,6 +55,16 @@ jobs:
           : "${DEPLOY_PATH:?Missing DEPLOY_PATH variable}"
           : "${APP_PORT:?Missing APP_PORT variable}"
           : "${PM2_APP_NAME:?Missing PM2_APP_NAME variable}"
+          : "${METRICS_DB_FILE:?Missing METRICS_DB_FILE variable}"
+          [[ "$DEPLOY_PATH" == /* ]] || { echo "DEPLOY_PATH must be absolute"; exit 1; }
+          IFS='/' read -r -a deploy_path_parts <<< "$DEPLOY_PATH"
+          (( ${#deploy_path_parts[@]} >= 5 )) || { echo "Refusing shallow DEPLOY_PATH=$DEPLOY_PATH"; exit 1; }
+          case "$DEPLOY_PATH" in
+            "/"|"/home"|"/home/"|"/var"|"/var/"|"/srv"|"/srv/"|"/tmp"|"/tmp/")
+              echo "Refusing unsafe DEPLOY_PATH=$DEPLOY_PATH"
+              exit 1
+              ;;
+          esac
 
       - name: Setup SSH
         run: |
@@ -72,16 +83,49 @@ jobs:
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
             "sudo -i mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/storage'"
 
+      - name: Backup Persistent Database
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo -Hiu root bash -s -- '$DEPLOY_PATH' '$METRICS_DB_FILE'" <<'EOF'
+          set -euo pipefail
+
+          DEPLOY_PATH="$1"
+          METRICS_DB_FILE="$2"
+          DB_PATH="$DEPLOY_PATH/$METRICS_DB_FILE"
+          BACKUP_DIR="$DEPLOY_PATH/storage/backups"
+
+          mkdir -p "$BACKUP_DIR"
+          if [ -f "$DB_PATH" ]; then
+            STAMP="$(date -u +%Y%m%d%H%M%S)"
+            cp -p "$DB_PATH" "$BACKUP_DIR/cloudflare-cache-metrics.$STAMP.sqlite"
+            find "$BACKUP_DIR" -type f -name 'cloudflare-cache-metrics.*.sqlite' \
+              -printf '%T@ %p\n' | sort -rn | awk 'NR>5 {print $2}' | xargs -r rm -f
+          fi
+          EOF
+
       - name: Sync Project Files
         run: |
           rsync -az --delete \
             -e "ssh -p $DEPLOY_PORT" \
             --rsync-path "sudo rsync" \
+            --filter "protect /storage/***" \
+            --filter "protect /data/***" \
+            --filter "protect /database/***" \
+            --filter "protect /backups/***" \
+            --filter "protect /*.db" \
+            --filter "protect /*.sqlite" \
+            --filter "protect /*.sqlite3" \
             --exclude ".git/" \
             --exclude ".github/" \
             --exclude "node_modules/" \
             --exclude "dist/" \
             --exclude "storage/" \
+            --exclude "data/" \
+            --exclude "database/" \
+            --exclude "backups/" \
+            --exclude "*.db" \
+            --exclude "*.sqlite" \
+            --exclude "*.sqlite3" \
             --exclude "*.log" \
             ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
 
@@ -95,6 +139,24 @@ jobs:
             --include "storage/*.txt" \
             --exclude "*" \
             ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      - name: Verify Persistent Database
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo -Hiu root bash -s -- '$DEPLOY_PATH' '$METRICS_DB_FILE'" <<'EOF'
+          set -euo pipefail
+
+          DEPLOY_PATH="$1"
+          METRICS_DB_FILE="$2"
+          DB_PATH="$DEPLOY_PATH/$METRICS_DB_FILE"
+
+          if [ -f "$DB_PATH" ]; then
+            test -s "$DB_PATH"
+            echo "Persistent database is present: $DB_PATH"
+          else
+            echo "Persistent database does not exist yet; app will create it on first run."
+          fi
+          EOF
 
       - name: Install And Restart App
         run: |
@@ -118,7 +180,7 @@ jobs:
           command -v bun
           command -v pm2
 
-          bun install --production --frozen-lockfile
+          bun install --production --frozen-lockfile --ignore-scripts
 
           export NODE_ENV=production
           export PORT="$APP_PORT"
