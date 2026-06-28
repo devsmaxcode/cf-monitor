@@ -63,15 +63,20 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
+      - name: Validate Sudo Access
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "sudo -n -i true"
+
       - name: Prepare Remote Directory
         run: |
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/storage'"
+            "sudo -i mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/storage'"
 
       - name: Sync Project Files
         run: |
           rsync -az --delete \
             -e "ssh -p $DEPLOY_PORT" \
+            --rsync-path "sudo rsync" \
             --exclude ".git/" \
             --exclude ".github/" \
             --exclude "node_modules/" \
@@ -84,6 +89,7 @@ jobs:
         run: |
           rsync -az --ignore-existing \
             -e "ssh -p $DEPLOY_PORT" \
+            --rsync-path "sudo rsync" \
             --include "storage/" \
             --include "storage/*.json" \
             --include "storage/*.txt" \
@@ -93,10 +99,15 @@ jobs:
       - name: Install And Restart App
         run: |
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "DEPLOY_PATH='$DEPLOY_PATH' APP_PORT='$APP_PORT' PM2_APP_NAME='$PM2_APP_NAME' bash -s" <<'EOF'
+            "sudo -i bash -s -- '$DEPLOY_PATH' '$APP_PORT' '$PM2_APP_NAME' '$DEPLOY_USER'" <<'EOF'
           set -euo pipefail
 
-          export PATH="$HOME/.bun/bin:/root/.bun/bin:$PATH"
+          DEPLOY_PATH="$1"
+          APP_PORT="$2"
+          PM2_APP_NAME="$3"
+          DEPLOY_LOGIN_USER="$4"
+
+          export PATH="/home/$DEPLOY_LOGIN_USER/.bun/bin:$HOME/.bun/bin:/root/.bun/bin:/usr/local/bin:/usr/bin:$PATH"
           cd "$DEPLOY_PATH"
 
           command -v bun
