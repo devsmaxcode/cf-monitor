@@ -2,3 +2,4 @@ node_modules/
 storage/*.csv
 scripts/storage/*.csv
 dist
+storage/cloudflare-cache-metrics.sqlite
