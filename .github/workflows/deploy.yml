@@ -108,10 +108,14 @@ jobs:
           DEPLOY_LOGIN_USER="$4"
 
           export PATH="/home/$DEPLOY_LOGIN_USER/.bun/bin:$HOME/.bun/bin:/root/.bun/bin:/usr/local/bin:/usr/bin:$PATH"
+          if [ -s "$HOME/.nvm/nvm.sh" ]; then
+            # shellcheck disable=SC1090
+            . "$HOME/.nvm/nvm.sh"
+            nvm use --silent default >/dev/null 2>&1 || true
+          fi
           cd "$DEPLOY_PATH"
 
           command -v bun
-          command -v curl
           command -v pm2
 
           bun install --production --frozen-lockfile
@@ -123,7 +127,7 @@ jobs:
           pm2 save
 
           pm2 describe "$PM2_APP_NAME" >/dev/null
-          curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/" >/dev/null
+          bun --eval "const res = await fetch('http://127.0.0.1:$APP_PORT/'); if (!res.ok) process.exit(1);"
           EOF
 
       - name: Public Health Check
