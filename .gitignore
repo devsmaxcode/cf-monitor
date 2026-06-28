@@ -1,5 +1,13 @@
-node_modules/
-storage/*.csv
-scripts/storage/*.csv
+node_modules
+.DS_Store
 dist
-storage/cloudflare-cache-metrics.sqlite
+dist-ssr
+*.local
+.env
+.nitro
+.tanstack
+.wrangler
+.output
+.vinxi
+__unconfig*
+todos.json
