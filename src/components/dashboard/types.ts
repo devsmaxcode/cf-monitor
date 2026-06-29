@@ -8,7 +8,8 @@ import type {
 import type { MetricRoundRow } from '#/lib/metrics-db'
 import type { MetricTimeColumn } from './helpers'
 
-export type DashboardSection = 'metrics' | 'rounds' | 'age' | 'config' | 'proxies' | 'logs'
+export type DashboardSection =
+  'metrics' | 'rounds' | 'age' | 'config' | 'proxies' | 'logs'
 export type MetricRow = MetricsPayload['rows'][number]
 
 export type DashboardRouteProps = {

@@ -9,10 +9,11 @@ import {
   compactUrl,
   duration,
   metricRangeLabel,
+  parseMetricRangeDays,
   rangeOptions,
   topHitUrls,
-  type CacheAgeBucket,
 } from '../helpers'
+import type { CacheAgeBucket } from '../helpers'
 import type { MetricRow } from '../types'
 
 export function AgePanel({
@@ -42,7 +43,9 @@ export function AgePanel({
           <span>Timeframe</span>
           <select
             aria-label="Cache age timeframe"
-            onChange={(event) => setRangeDays(Number(event.target.value) as MetricRangeDays)}
+            onChange={(event) =>
+              setRangeDays(parseMetricRangeDays(event.target.value))
+            }
             value={rangeDays}
           >
             {rangeOptions.map((days) => (
@@ -54,13 +57,23 @@ export function AgePanel({
         </label>
       </div>
       <div className="cache-age-dashboard">
-        {rows.length && buckets.length ? <AgeDashboard buckets={buckets} rows={rows} /> : <div className="empty-state">No cache age data yet.</div>}
+        {rows.length && buckets.length ? (
+          <AgeDashboard buckets={buckets} rows={rows} />
+        ) : (
+          <div className="empty-state">No cache age data yet.</div>
+        )}
       </div>
     </section>
   )
 }
 
-function AgeDashboard({ buckets, rows }: { buckets: CacheAgeBucket[]; rows: MetricRow[] }) {
+function AgeDashboard({
+  buckets,
+  rows,
+}: {
+  buckets: CacheAgeBucket[]
+  rows: MetricRow[]
+}) {
   const summary = cacheAgeSummary(buckets)
   const urls = topHitUrls(rows)
 
@@ -123,7 +136,12 @@ function AgeDashboard({ buckets, rows }: { buckets: CacheAgeBucket[]; rows: Metr
   )
 }
 
-function AgeStat(props: { label: string; meta: string; tone: string; value: string }) {
+function AgeStat(props: {
+  label: string
+  meta: string
+  tone: string
+  value: string
+}) {
   return (
     <div className={`age-stat ${props.tone}`}>
       <span>{props.label}</span>
@@ -142,12 +160,36 @@ function CacheStatusBars({ buckets }: { buckets: CacheAgeBucket[] }) {
       {visible.map((bucket) => {
         const height = Math.max(10, Math.round((bucket.total / maxTotal) * 100))
         return (
-          <div className="age-status-column" key={bucket.key} title={ageBucketTitle(bucket)}>
+          <div
+            className="age-status-column"
+            key={bucket.key}
+            title={ageBucketTitle(bucket)}
+          >
             <div className="age-status-stack" style={{ height: `${height}%` }}>
-              <i className="hit" style={{ height: `${ageSegmentHeight(bucket.hits, bucket.total)}%` }} />
-              <i className="miss" style={{ height: `${ageSegmentHeight(bucket.missLike, bucket.total)}%` }} />
-              <i className="warn" style={{ height: `${ageSegmentHeight(bucket.noHeader, bucket.total)}%` }} />
-              <i className="fail" style={{ height: `${ageSegmentHeight(bucket.errors, bucket.total)}%` }} />
+              <i
+                className="hit"
+                style={{
+                  height: `${ageSegmentHeight(bucket.hits, bucket.total)}%`,
+                }}
+              />
+              <i
+                className="miss"
+                style={{
+                  height: `${ageSegmentHeight(bucket.missLike, bucket.total)}%`,
+                }}
+              />
+              <i
+                className="warn"
+                style={{
+                  height: `${ageSegmentHeight(bucket.noHeader, bucket.total)}%`,
+                }}
+              />
+              <i
+                className="fail"
+                style={{
+                  height: `${ageSegmentHeight(bucket.errors, bucket.total)}%`,
+                }}
+              />
             </div>
             <span>{bucket.label}</span>
           </div>
@@ -187,21 +229,31 @@ function AgeLineChart({ buckets }: { buckets: CacheAgeBucket[] }) {
   const pad = 24
   const maxAge = Math.max(1, ...visible.map((bucket) => bucket.maxAge))
   const points = visible.map((bucket, index) => {
-    const x = visible.length === 1 ? width / 2 : pad + (index / (visible.length - 1)) * (width - pad * 2)
+    const x =
+      visible.length === 1
+        ? width / 2
+        : pad + (index / (visible.length - 1)) * (width - pad * 2)
     const y = height - pad - (bucket.maxAge / maxAge) * (height - pad * 2)
     return { bucket, x: Math.round(x), y: Math.round(y) }
   })
   const line = points.map((point) => `${point.x},${point.y}`).join(' ')
   const last = points[points.length - 1]
-  const area =
-    points.length && last
-      ? `M ${points[0].x} ${height - pad} L ${points.map((point) => `${point.x} ${point.y}`).join(' L ')} L ${last.x} ${height - pad} Z`
-      : ''
+  const area = points.length
+    ? `M ${points[0].x} ${height - pad} L ${points.map((point) => `${point.x} ${point.y}`).join(' L ')} L ${last.x} ${height - pad} Z`
+    : ''
 
   return (
     <div className="age-line-wrap">
-      <svg aria-label="Cache age over time" className="age-line-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
-        <path className="age-line-grid" d={`M ${pad} ${height - pad} H ${width - pad} M ${pad} ${pad} H ${width - pad}`} />
+      <svg
+        aria-label="Cache age over time"
+        className="age-line-chart"
+        role="img"
+        viewBox={`0 0 ${width} ${height}`}
+      >
+        <path
+          className="age-line-grid"
+          d={`M ${pad} ${height - pad} H ${width - pad} M ${pad} ${pad} H ${width - pad}`}
+        />
         {area ? <path className="age-line-area" d={area} /> : null}
         {line ? <polyline className="age-line" points={line} /> : null}
         {points.map((point) => (
@@ -220,7 +272,12 @@ function AgeLineChart({ buckets }: { buckets: CacheAgeBucket[] }) {
 }
 
 function TopHitUrlChart({ rows }: { rows: ReturnType<typeof topHitUrls> }) {
-  if (!rows.length) return <div className="empty-state compact">No HIT rows found in this timeframe.</div>
+  if (!rows.length)
+    return (
+      <div className="empty-state compact">
+        No HIT rows found in this timeframe.
+      </div>
+    )
 
   const maxHits = Math.max(1, ...rows.map((row) => row.hits))
   return (
@@ -232,8 +289,8 @@ function TopHitUrlChart({ rows }: { rows: ReturnType<typeof topHitUrls> }) {
             <div className="top-hit-copy">
               <strong>{compactUrl(row.url)}</strong>
               <span>
-                {compact(row.hits)} HIT / {compact(row.useful)} useful - {row.hitRate}% HIT - max age{' '}
-                {duration(row.maxAge)}
+                {compact(row.hits)} HIT / {compact(row.useful)} useful -{' '}
+                {row.hitRate}% HIT - max age {duration(row.maxAge)}
               </span>
             </div>
             <b>{row.hitRate}%</b>

@@ -22,7 +22,7 @@ export function RoundsPanel(props: RoundsPanelProps) {
   const stats = roundStats(rounds, props.rounds.length)
   const selected =
     rounds.find((round) => round.id === props.selectedRound?.id) ??
-    rounds[0] ??
+    rounds.at(0) ??
     props.selectedRound
 
   return (
@@ -38,7 +38,9 @@ export function RoundsPanel(props: RoundsPanelProps) {
           </div>
         </div>
         <div className="rounds-hero-actions">
-          <div className={`rounds-live ${props.status.busy ? 'active' : props.status.running ? 'armed' : ''}`}>
+          <div
+            className={`rounds-live ${props.status.busy ? 'active' : props.status.running ? 'armed' : ''}`}
+          >
             <span aria-hidden="true" />
             <strong>{roundsLiveLabel(props.status)}</strong>
           </div>
@@ -49,7 +51,11 @@ export function RoundsPanel(props: RoundsPanelProps) {
         <div className="rounds-list-wrap">
           <div className="rounds-list-head">
             <h3>All Rounds</h3>
-            <span>{rounds.length ? `${rounds.length} shown / ${props.rounds.length} retained` : 'Empty'}</span>
+            <span>
+              {rounds.length
+                ? `${rounds.length} shown / ${props.rounds.length} retained`
+                : 'Empty'}
+            </span>
           </div>
           <div className="rounds-list">
             {rounds.length ? (
@@ -63,7 +69,9 @@ export function RoundsPanel(props: RoundsPanelProps) {
               ))
             ) : (
               <div className="empty-state">
-                {props.rounds.length ? `No rounds in ${metricRangeLabel(props.rangeDays).toLowerCase()}.` : 'No rounds recorded yet.'}
+                {props.rounds.length
+                  ? `No rounds in ${metricRangeLabel(props.rangeDays).toLowerCase()}.`
+                  : 'No rounds recorded yet.'}
               </div>
             )}
           </div>
@@ -84,9 +92,16 @@ export function RoundsPanel(props: RoundsPanelProps) {
             </div>
           </div>
           {selected ? (
-            <RoundDetails config={props.config} maxRows={stats.maxRows} round={selected} rows={props.rows} />
+            <RoundDetails
+              config={props.config}
+              maxRows={stats.maxRows}
+              round={selected}
+              rows={props.rows}
+            />
           ) : (
-            <div className="empty-state">Run the monitor once to populate round stats.</div>
+            <div className="empty-state">
+              Run the monitor once to populate round stats.
+            </div>
           )}
         </div>
       </div>
@@ -107,9 +122,14 @@ function RoundDetails({
 }) {
   const details = roundDetailStats(round, rows)
   const profile = roundProfile(round)
-  const rowPercent = maxRows ? Math.max(4, Math.round((round.total_rows / maxRows) * 100)) : 0
+  const rowPercent = maxRows
+    ? Math.max(4, Math.round((round.total_rows / maxRows) * 100))
+    : 0
   const pageCount = round.page_count || details.pages || config.pages.length
-  const locationCount = round.proxy_country_count || details.countries || configuredLocationCount(config)
+  const locationCount =
+    round.proxy_country_count ||
+    details.countries ||
+    configuredLocationCount(config)
   const pageCountry = `${pageCount} URLs / ${locationCount} locations`
 
   return (
@@ -186,7 +206,9 @@ function RoundDetails({
         </div>
         <div>
           <dt>Timeout</dt>
-          <dd>{profile.timeout ? `${profile.timeout}s` : `${config.timeout}s`}</dd>
+          <dd>
+            {profile.timeout ? `${profile.timeout}s` : `${config.timeout}s`}
+          </dd>
         </div>
         <div>
           <dt>Delay</dt>
@@ -221,9 +243,12 @@ function RoundItem({
           <RoundStatus status={round.status} />
         </div>
         <p>
-          {round.reason || 'scheduled'} - {round.started_at ? shortDate(round.started_at) : '-'}
+          {round.reason || 'scheduled'} -{' '}
+          {round.started_at ? shortDate(round.started_at) : '-'}
         </p>
-        {round.error ? <small className="round-error">{round.error}</small> : null}
+        {round.error ? (
+          <small className="round-error">{round.error}</small>
+        ) : null}
       </div>
       <div className="round-item-metrics">
         <span>{compact(round.total_rows)} rows</span>
@@ -235,10 +260,16 @@ function RoundItem({
 }
 
 function RoundStatus({ status }: { status: MetricRoundRow['status'] }) {
-  return <span className={`round-status ${status}`}>{roundStatusLabel(status)}</span>
+  return (
+    <span className={`round-status ${status}`}>{roundStatusLabel(status)}</span>
+  )
 }
 
-function roundsInSelectedRange(rounds: MetricRoundRow[], rangeDays: RoundsPanelProps['rangeDays']) {
+function roundsInSelectedRange(
+  rounds: MetricRoundRow[],
+  rangeDays: RoundsPanelProps['rangeDays'],
+) {
+  if (rangeDays === 'all') return rounds
   const cutoff = Date.now() - rangeDays * dayMs
   return rounds.filter((round) => {
     if (round.status === 'running') return true
@@ -255,7 +286,7 @@ function roundTime(round: MetricRoundRow) {
 
 function roundStats(rounds: MetricRoundRow[], retained: number) {
   return {
-    latest: rounds[0] || null,
+    latest: rounds.at(0) || null,
     maxRows: Math.max(0, ...rounds.map((round) => round.total_rows)),
     retained,
     rows: rounds.reduce((sum, round) => sum + round.total_rows, 0),
@@ -263,33 +294,56 @@ function roundStats(rounds: MetricRoundRow[], retained: number) {
   }
 }
 
-function roundsSubtitle(stats: ReturnType<typeof roundStats>, rangeDays: RoundsPanelProps['rangeDays']) {
+function roundsSubtitle(
+  stats: ReturnType<typeof roundStats>,
+  rangeDays: RoundsPanelProps['rangeDays'],
+) {
   const range = metricRangeLabel(rangeDays).toLowerCase()
-  if (!stats.retained) return 'No rounds yet. Start the monitor to build a run history.'
-  if (!stats.total) return `No rounds in ${range}; ${stats.retained} retained outside this window.`
-  const latestText = stats.latest?.started_at ? `latest ${relativeTime(stats.latest.started_at)}` : 'latest saved'
+  if (!stats.retained)
+    return 'No rounds yet. Start the monitor to build a run history.'
+  if (rangeDays === 'all')
+    return `${stats.total} rounds retained, ${compact(stats.rows)} rows`
+  if (!stats.total)
+    return `No rounds in ${range}; ${stats.retained} retained outside this window.`
+  const latestText = stats.latest?.started_at
+    ? `latest ${relativeTime(stats.latest.started_at)}`
+    : 'latest saved'
   return `${stats.total} rounds in ${range}, ${compact(stats.rows)} rows, ${latestText}`
 }
 
 function roundsLiveLabel(status: RoundsPanelProps['status']) {
-  if (status.busy) return status.round ? `Round ${status.round} running` : 'Round running'
-  if (status.running) return status.nextRunAt ? `Armed - ${relativeTime(status.nextRunAt)}` : 'Armed'
+  if (status.busy)
+    return status.round ? `Round ${status.round} running` : 'Round running'
+  if (status.running)
+    return status.nextRunAt
+      ? `Armed - ${relativeTime(status.nextRunAt)}`
+      : 'Armed'
   return 'Stopped'
 }
 
 function roundRows(round: MetricRoundRow, rows: MetricRow[]) {
   const id = String(round.id)
-  return rows.filter((row) => metricRoundBase(row.round_id || row.round || '') === id)
+  return rows.filter(
+    (row) => metricRoundBase(row.round_id || row.round || '') === id,
+  )
 }
 
 function roundDetailStats(round: MetricRoundRow, rows: MetricRow[]) {
   const targetRows = roundRows(round, rows)
   const hits = targetRows.filter((row) => cacheStatus(row) === 'HIT').length
   const misses = targetRows.filter((row) => isMissLike(cacheStatus(row))).length
-  const errors = targetRows.filter((row) => row.error || cacheStatus(row) === 'FAIL').length
-  const responseValues = targetRows.map((row) => Number(row.response_ms)).filter((value) => Number.isFinite(value) && value > 0)
-  const pages = unique(targetRows.map((row) => row.page || row.url || '')).length
-  const countries = unique(targetRows.map((row) => row.proxy_country || '')).length
+  const errors = targetRows.filter(
+    (row) => row.error || cacheStatus(row) === 'FAIL',
+  ).length
+  const responseValues = targetRows
+    .map((row) => Number(row.response_ms))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  const pages = unique(
+    targetRows.map((row) => row.page || row.url || ''),
+  ).length
+  const countries = unique(
+    targetRows.map((row) => row.proxy_country || ''),
+  ).length
   const edges = unique(targetRows.map((row) => row.cf_edge || '')).length
   const total = targetRows.length || round.total_rows
 
@@ -313,5 +367,10 @@ function roundProfile(round: MetricRoundRow) {
 }
 
 function configuredLocationCount(config: Config) {
-  return config.proxyCountries.split(',').map((country) => country.trim()).filter(Boolean).length + (config.noDirect ? 0 : 1)
+  return (
+    config.proxyCountries
+      .split(',')
+      .map((country) => country.trim())
+      .filter(Boolean).length + (config.noDirect ? 0 : 1)
+  )
 }

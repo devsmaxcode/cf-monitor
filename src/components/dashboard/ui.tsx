@@ -9,12 +9,22 @@ export function RuntimeBadge({ status }: { status: MonitorState }) {
   return (
     <span className={`state-chip ${live ? 'on' : ''}`}>
       <i />
-      {status.busy ? `Running round ${status.round || ''}` : status.running ? 'Scheduled' : 'Stopped'}
+      {status.busy
+        ? `Running round ${status.round || ''}`
+        : status.running
+          ? 'Scheduled'
+          : 'Stopped'}
     </span>
   )
 }
 
-export function NextRun({ interval, status }: { interval: number; status: MonitorState }) {
+export function NextRun({
+  interval,
+  status,
+}: {
+  interval: number
+  status: MonitorState
+}) {
   const [now, setNow] = useState<number | null>(null)
   useEffect(() => {
     const updateNow = () => setNow(Date.now())
@@ -38,7 +48,8 @@ export function NextRun({ interval, status }: { interval: number; status: Monito
         <span className="crawl-copy">
           <strong>Requesting URLs</strong>
           <span>
-            Round {status.round || '-'} - {status.crawl.requestedUrls} of {status.crawl.totalUrls} requested
+            Round {status.round || '-'} - {status.crawl.requestedUrls} of{' '}
+            {status.crawl.totalUrls} requested
           </span>
         </span>
         <span aria-hidden="true" className="crawl-track">
@@ -54,8 +65,14 @@ export function NextRun({ interval, status }: { interval: number; status: Monito
   if (!status.nextRunAt || !status.running) return null
   if (now === null) return null
 
-  const seconds = Math.max(0, Math.round((Date.parse(status.nextRunAt) - now) / 1000))
-  const progress = Math.max(0, Math.min(100, 100 - Math.round((seconds / interval) * 100)))
+  const seconds = Math.max(
+    0,
+    Math.round((Date.parse(status.nextRunAt) - now) / 1000),
+  )
+  const progress = Math.max(
+    0,
+    Math.min(100, 100 - Math.round((seconds / interval) * 100)),
+  )
   return (
     <div
       className="next-run-card"
@@ -69,7 +86,9 @@ export function NextRun({ interval, status }: { interval: number; status: Monito
       <span className="next-run-copy">
         <strong>Next round</strong>
       </span>
-      <span className="next-run-clock">{seconds ? countdown(seconds) : 'Starting'}</span>
+      <span className="next-run-clock">
+        {seconds ? countdown(seconds) : 'Starting'}
+      </span>
       <span aria-hidden="true" className="next-run-track">
         <i />
       </span>
@@ -77,7 +96,15 @@ export function NextRun({ interval, status }: { interval: number; status: Monito
   )
 }
 
-export function Stat({ icon, label, value }: { icon?: ReactNode; label: string; value: string }) {
+export function Stat({
+  icon,
+  label,
+  value,
+}: {
+  icon?: ReactNode
+  label: string
+  value: string
+}) {
   return (
     <div className="stat">
       {icon ? <span>{icon}</span> : null}
@@ -97,7 +124,13 @@ export function IconButton({
   onClick: () => void
 }) {
   return (
-    <button aria-label={label} className="icon-button" onClick={onClick} title={label} type="button">
+    <button
+      aria-label={label}
+      className="icon-button"
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
       {children}
     </button>
   )
@@ -110,7 +143,11 @@ export function Check(props: {
 }) {
   return (
     <label className="check">
-      <input checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} type="checkbox" />
+      <input
+        checked={props.checked}
+        onChange={(event) => props.onChange(event.target.checked)}
+        type="checkbox"
+      />
       <span>{props.label}</span>
     </label>
   )

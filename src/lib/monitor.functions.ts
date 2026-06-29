@@ -1,14 +1,20 @@
 import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import type { Config } from './monitor.server'
-import { metricRangeDayOptions, type MetricRangeDays } from './metric-range'
+import { metricRangeDayOptions } from './metric-range'
+import type { MetricRangeDays } from './metric-range'
 
-const daysSchema = z.object({
-  days: z
+const metricRangeDaysSchema: z.ZodType<MetricRangeDays> = z.union([
+  z.literal('all'),
+  z
     .number()
-    .refine((value): value is MetricRangeDays =>
+    .refine((value): value is Extract<MetricRangeDays, number> =>
       metricRangeDayOptions.includes(value as MetricRangeDays),
     ),
+])
+
+const daysSchema = z.object({
+  days: metricRangeDaysSchema,
 })
 
 const metricFiltersSchema = z.object({
@@ -71,10 +77,12 @@ export const saveConfigFn = createServerFn({ method: 'POST' })
     return saveConfig(sanitizeConfig(data))
   })
 
-export const getProxiesFn = createServerFn({ method: 'GET' }).handler(async () => {
-  const { readProxies } = await import('./monitor.server')
-  return readProxies()
-})
+export const getProxiesFn = createServerFn({ method: 'GET' }).handler(
+  async () => {
+    const { readProxies } = await import('./monitor.server')
+    return readProxies()
+  },
+)
 
 export const saveProxiesFn = createServerFn({ method: 'POST' })
   .validator((input: unknown) => z.object({ text: z.string() }).parse(input))
@@ -83,17 +91,23 @@ export const saveProxiesFn = createServerFn({ method: 'POST' })
     return saveProxies(data.text)
   })
 
-export const startMonitorFn = createServerFn({ method: 'POST' }).handler(async () => {
-  const { startMonitor } = await import('./monitor.server')
-  return startMonitor()
-})
+export const startMonitorFn = createServerFn({ method: 'POST' }).handler(
+  async () => {
+    const { startMonitor } = await import('./monitor.server')
+    return startMonitor()
+  },
+)
 
-export const stopMonitorFn = createServerFn({ method: 'POST' }).handler(async () => {
-  const { stopMonitor } = await import('./monitor.server')
-  return stopMonitor()
-})
+export const stopMonitorFn = createServerFn({ method: 'POST' }).handler(
+  async () => {
+    const { stopMonitor } = await import('./monitor.server')
+    return stopMonitor()
+  },
+)
 
-export const runOnceFn = createServerFn({ method: 'POST' }).handler(async () => {
-  const { runOnce } = await import('./monitor.server')
-  return runOnce()
-})
+export const runOnceFn = createServerFn({ method: 'POST' }).handler(
+  async () => {
+    const { runOnce } = await import('./monitor.server')
+    return runOnce()
+  },
+)

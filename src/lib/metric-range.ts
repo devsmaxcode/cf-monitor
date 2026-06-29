@@ -1,4 +1,3 @@
-export const METRIC_RETENTION_DAYS = 10
-export const metricRangeDayOptions = [1, 7, METRIC_RETENTION_DAYS] as const
+export const metricRangeDayOptions = [1, 7, 10, 30, 90, 'all'] as const
 export type MetricRangeDays = (typeof metricRangeDayOptions)[number]
-export const defaultMetricRangeDays: MetricRangeDays = METRIC_RETENTION_DAYS
+export const defaultMetricRangeDays: MetricRangeDays = 'all'

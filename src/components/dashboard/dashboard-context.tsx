@@ -5,8 +5,8 @@ import {
   useEffect,
   useMemo,
   useState,
-  type ReactNode,
 } from 'react'
+import type { ReactNode } from 'react'
 import {
   getDashboardFn,
   getProxiesFn,
@@ -17,7 +17,12 @@ import {
   startMonitorFn,
   stopMonitorFn,
 } from '#/lib/monitor.functions'
-import type { Config, DashboardPayload, MetricsPayload, MonitorState } from '#/lib/monitor.server'
+import type {
+  Config,
+  DashboardPayload,
+  MetricsPayload,
+  MonitorState,
+} from '#/lib/monitor.server'
 import { normalizeDraft } from './helpers'
 import { useStoredRange } from './use-stored-range'
 import type { DashboardSection, RuntimeAction } from './types'
@@ -40,10 +45,19 @@ type DashboardActionsContextValue = {
   triggerAction: (kind: RuntimeAction) => Promise<void>
 }
 
-const DashboardDataContext = createContext<DashboardDataContextValue | null>(null)
-const DashboardActionsContext = createContext<DashboardActionsContextValue | null>(null)
+const DashboardDataContext = createContext<DashboardDataContextValue | null>(
+  null,
+)
+const DashboardActionsContext =
+  createContext<DashboardActionsContextValue | null>(null)
 
-export function DashboardProvider({ children, initial }: { children: ReactNode; initial: DashboardPayload }) {
+export function DashboardProvider({
+  children,
+  initial,
+}: {
+  children: ReactNode
+  initial: DashboardPayload
+}) {
   const [rangeDays, setRangeDays] = useStoredRange()
   const [config, setConfig] = useState<Config>(initial.config)
   const [metrics, setMetrics] = useState<MetricsPayload>(initial.metrics)
@@ -57,30 +71,39 @@ export function DashboardProvider({ children, initial }: { children: ReactNode; 
     setError(err instanceof Error ? err.message : String(err))
   }, [])
 
-  const loadDashboard = useCallback(async (days = rangeDays) => {
-    setError('')
-    const payload = await getDashboardFn({ data: { days } })
-    setConfig(payload.config)
-    setMetrics(payload.metrics)
-    setStatus(payload.status)
-    setProxyText(payload.proxies.text)
-  }, [rangeDays])
+  const loadDashboard = useCallback(
+    async (days = rangeDays) => {
+      setError('')
+      const payload = await getDashboardFn({ data: { days } })
+      setConfig(payload.config)
+      setMetrics(payload.metrics)
+      setStatus(payload.status)
+      setProxyText(payload.proxies.text)
+    },
+    [rangeDays],
+  )
 
-  const refreshRuntime = useCallback(async (days = rangeDays) => {
-    const payload = await getRuntimeFn({ data: { days } })
-    setMetrics(payload.metrics)
-    setStatus(payload.status)
-  }, [rangeDays])
+  const refreshRuntime = useCallback(
+    async (days = rangeDays) => {
+      const payload = await getRuntimeFn({ data: { days } })
+      setMetrics(payload.metrics)
+      setStatus(payload.status)
+    },
+    [rangeDays],
+  )
 
   useEffect(() => {
     void loadDashboard(rangeDays).catch(showError)
   }, [loadDashboard, rangeDays, showError])
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (dirtyPanel) return
-      void refreshRuntime().catch(showError)
-    }, status.busy || status.running ? 3000 : 12000)
+    const timer = window.setInterval(
+      () => {
+        if (dirtyPanel) return
+        void refreshRuntime().catch(showError)
+      },
+      status.busy || status.running ? 3000 : 12000,
+    )
 
     return () => window.clearInterval(timer)
   }, [dirtyPanel, refreshRuntime, showError, status.busy, status.running])
@@ -154,24 +177,35 @@ export function DashboardProvider({ children, initial }: { children: ReactNode; 
       setRangeDays,
       triggerAction,
     }),
-    [error, saveConfigDraft, saveProxyDraft, saving, setRangeDays, triggerAction],
+    [
+      error,
+      saveConfigDraft,
+      saveProxyDraft,
+      saving,
+      setRangeDays,
+      triggerAction,
+    ],
   )
 
   return (
     <DashboardDataContext.Provider value={data}>
-      <DashboardActionsContext.Provider value={actions}>{children}</DashboardActionsContext.Provider>
+      <DashboardActionsContext.Provider value={actions}>
+        {children}
+      </DashboardActionsContext.Provider>
     </DashboardDataContext.Provider>
   )
 }
 
 export function useDashboardData() {
   const context = useContext(DashboardDataContext)
-  if (!context) throw new Error('useDashboardData must be used within DashboardProvider')
+  if (!context)
+    throw new Error('useDashboardData must be used within DashboardProvider')
   return context
 }
 
 export function useDashboardActions() {
   const context = useContext(DashboardActionsContext)
-  if (!context) throw new Error('useDashboardActions must be used within DashboardProvider')
+  if (!context)
+    throw new Error('useDashboardActions must be used within DashboardProvider')
   return context
 }

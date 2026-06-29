@@ -3,7 +3,12 @@ import { IconButton, NextRun, RuntimeBadge } from './ui'
 import type { RuntimeChromeProps } from './types'
 import { shortDate } from './helpers'
 
-export function DashboardHeader({ intervalSeconds, lastTimestamp, onAction, status }: RuntimeChromeProps) {
+export function DashboardHeader({
+  intervalSeconds,
+  lastTimestamp,
+  onAction,
+  status,
+}: RuntimeChromeProps) {
   return (
     <header className="appbar">
       <div className="brand">
@@ -12,7 +17,9 @@ export function DashboardHeader({ intervalSeconds, lastTimestamp, onAction, stat
         </span>
         <div>
           <strong>Cloudflare Cache Monitor</strong>
-          <span>{lastTimestamp ? shortDate(lastTimestamp) : 'No samples yet'}</span>
+          <span>
+            {lastTimestamp ? shortDate(lastTimestamp) : 'No samples yet'}
+          </span>
         </div>
       </div>
 
@@ -24,18 +31,30 @@ export function DashboardHeader({ intervalSeconds, lastTimestamp, onAction, stat
             <RefreshCw size={18} />
           </IconButton>
           {status.busy ? null : (
-            <button className="button secondary" onClick={() => onAction('run-once')} type="button">
+            <button
+              className="button secondary"
+              onClick={() => onAction('run-once')}
+              type="button"
+            >
               <Activity size={18} />
               Run Now
             </button>
           )}
           {status.running || status.busy ? (
-            <button className="button danger" onClick={() => onAction('stop')} type="button">
+            <button
+              className="button danger"
+              onClick={() => onAction('stop')}
+              type="button"
+            >
               <Square size={17} />
               Stop
             </button>
           ) : (
-            <button className="button primary" onClick={() => onAction('start')} type="button">
+            <button
+              className="button primary"
+              onClick={() => onAction('start')}
+              type="button"
+            >
               <Play size={17} />
               Start
             </button>

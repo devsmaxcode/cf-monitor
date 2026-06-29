@@ -1,15 +1,15 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
-import { METRIC_RETENTION_DAYS } from './metric-range.ts'
+import initSqlJs from 'sql.js'
+import type { Database as SqlJsDatabase, SqlValue } from 'sql.js'
 
 export const DEFAULT_METRICS_DB = 'storage/cloudflare-cache-metrics.sqlite'
-export { METRIC_RETENTION_DAYS } from './metric-range.ts'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const projectRoot = resolve(process.env.APP_ROOT || process.cwd())
 const SQL_READY = initSqlJs({
-  locateFile: (file) => join(projectRoot, 'node_modules', 'sql.js', 'dist', file),
+  locateFile: (file) =>
+    join(projectRoot, 'node_modules', 'sql.js', 'dist', file),
 })
 
 export const METRIC_FIELDS = [
@@ -117,16 +117,27 @@ type DbHandle = {
 }
 
 export function normalizeMetricsOutput(output?: string) {
-  const value = String(output || DEFAULT_METRICS_DB).trim() || DEFAULT_METRICS_DB
-  return value.replace(/\.csv$/i, '.sqlite')
+  const normalizedOutput =
+    String(output || DEFAULT_METRICS_DB).trim() || DEFAULT_METRICS_DB
+  return normalizedOutput.replace(/\.csv$/i, '.sqlite')
 }
 
 export function resolveMetricsDbPath(output: string, baseDir = process.cwd()) {
   const normalized = normalizeMetricsOutput(output)
-  return isAbsolute(normalized) ? normalized : join(baseDir, normalized)
+  if (isAbsolute(normalized)) return normalized
+
+  const storageMatch = normalized.match(/^storage[\\/](.+)$/)
+  if (storageMatch?.[1])
+    return join(metricsStorageDir(baseDir), storageMatch[1])
+
+  return join(baseDir, normalized)
 }
 
-export async function appendMetricRows(output: string, rows: MetricRow[], baseDir = process.cwd()) {
+export async function appendMetricRows(
+  output: string,
+  rows: MetricRow[],
+  baseDir = process.cwd(),
+) {
   if (!rows.length) return
 
   await withMetricsDb(output, baseDir, true, ({ db }) => {
@@ -184,7 +195,12 @@ export async function readMetricRows(
     const range = normalizeMetricDateRange(dateRange)
     const order = dateRange.order === 'desc' ? 'DESC' : 'ASC'
     const limit = boundedInteger(dateRange.limit, 0, 100000, 0)
-    const params: unknown[] = [range.sinceIso, range.sinceIso, range.untilIso, range.untilIso]
+    const params: unknown[] = [
+      range.sinceIso,
+      range.sinceIso,
+      range.untilIso,
+      range.untilIso,
+    ]
     const limitSql = limit ? 'LIMIT ?' : ''
     if (limit) params.push(limit)
     const rows = selectRows(
@@ -251,7 +267,12 @@ export async function readMetricRowsPage(
       [...filtered.params, pageSize, offset],
     )
     const groupFilter = metricGroupWhere(groupRows)
-    const pageFilter = metricQueryWhere(range, input.filters, [groupFilter.sql], groupFilter.params)
+    const pageFilter = metricQueryWhere(
+      range,
+      input.filters,
+      [groupFilter.sql],
+      groupFilter.params,
+    )
     const rows = groupRows.length
       ? selectRows(
           db,
@@ -288,7 +309,9 @@ export async function readMetricRowsPage(
       round_id: value(row.round_id),
       started_at: value(row.started_at),
     }))
-    const boundsFilter = metricQueryWhere(range, undefined, ["timestamp_utc <> ''"])
+    const boundsFilter = metricQueryWhere(range, undefined, [
+      "timestamp_utc <> ''",
+    ])
     const [bounds] = selectRows(
       db,
       `
@@ -363,16 +386,21 @@ export async function finalizeMetricRound(
   if (!roundId) return null
 
   return withMetricsDb(output, baseDir, true, ({ db }) => {
-    const [existing] = selectRows(db, 'SELECT started_at FROM cache_rounds WHERE id = ? LIMIT 1', [
-      roundId,
-    ])
+    const existing = selectRows(
+      db,
+      'SELECT started_at FROM cache_rounds WHERE id = ? LIMIT 1',
+      [roundId],
+    ).at(0)
     if (!existing) return null
 
     const completedAt = input.completedAt || nowIso()
     const counts = metricRoundCounts(db, roundId)
     const totalRows = input.totalRows ?? counts.totalRows
     const recheckRows = input.recheckRows ?? counts.recheckRows
-    const durationMs = durationMsBetween(value(existing.started_at), completedAt)
+    const durationMs = durationMsBetween(
+      value(existing.started_at),
+      completedAt,
+    )
 
     db.run(
       `
@@ -396,7 +424,6 @@ export async function finalizeMetricRound(
         roundId,
       ],
     )
-    pruneOldMetricRounds(db, METRIC_RETENTION_DAYS)
 
     const [row] = selectRows(
       db,
@@ -415,10 +442,12 @@ export async function finalizeMetricRound(
 
 export async function applyMetricRoundRetention(
   output: string,
-  keepDays = METRIC_RETENTION_DAYS,
+  keepDays = 0,
   baseDir = process.cwd(),
 ) {
-  await withMetricsDb(output, baseDir, true, ({ db }) => pruneOldMetricRounds(db, keepDays))
+  await withMetricsDb(output, baseDir, true, ({ db }) =>
+    pruneOldMetricRounds(db, keepDays),
+  )
 }
 
 export async function readMetricRounds(
@@ -469,12 +498,17 @@ async function withMetricsDb<T>(
   }
 }
 
-async function openMetricsDb(output: string, baseDir = process.cwd()): Promise<DbHandle> {
+async function openMetricsDb(
+  output: string,
+  baseDir = process.cwd(),
+): Promise<DbHandle> {
   const filename = resolveMetricsDbPath(output, baseDir)
   await mkdir(dirname(filename), { recursive: true })
 
   const SQL = await SQL_READY
-  const db = new SQL.Database((await exists(filename)) ? await readFile(filename) : undefined)
+  const db = new SQL.Database(
+    (await exists(filename)) ? await readFile(filename) : undefined,
+  )
   ensureMetricsSchema(db)
   await persistDb({ db, filename })
   return { db, filename }
@@ -482,6 +516,12 @@ async function openMetricsDb(output: string, baseDir = process.cwd()): Promise<D
 
 async function persistDb({ db, filename }: DbHandle) {
   await writeFile(filename, Buffer.from(db.export()))
+}
+
+function metricsStorageDir(baseDir: string) {
+  return resolve(
+    process.env.STORAGE_DIR || process.env.DATA_DIR || join(baseDir, 'storage'),
+  )
 }
 
 async function exists(path: string) {
@@ -537,32 +577,49 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
   `)
   addRoundIdColumnIfMissing(db)
   backfillLegacyRound(db)
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_rounds_status ON cache_rounds (status)')
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_rounds_started_at ON cache_rounds (started_at)')
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_metrics_round_id ON cache_metrics (round_id)')
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_metrics_timestamp ON cache_metrics (timestamp_utc)')
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_metrics_page_country ON cache_metrics (page, proxy_country)')
-  db.run('CREATE INDEX IF NOT EXISTS idx_cache_metrics_status ON cache_metrics (cf_cache_status)')
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_rounds_status ON cache_rounds (status)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_rounds_started_at ON cache_rounds (started_at)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_round_id ON cache_metrics (round_id)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_timestamp ON cache_metrics (timestamp_utc)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_page_country ON cache_metrics (page, proxy_country)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_status ON cache_metrics (cf_cache_status)',
+  )
 }
 
 function addRoundIdColumnIfMissing(db: SqlJsDatabase) {
   const columns = selectRows(db, 'PRAGMA table_info(cache_metrics)')
   if (columns.some((column) => value(column.name) === 'round_id')) return
-  db.run('ALTER TABLE cache_metrics ADD COLUMN round_id INTEGER NOT NULL DEFAULT 0')
+  db.run(
+    'ALTER TABLE cache_metrics ADD COLUMN round_id INTEGER NOT NULL DEFAULT 0',
+  )
 }
 
 function backfillLegacyRound(db: SqlJsDatabase) {
-  const [pending] = selectRows(db, 'SELECT COUNT(*) AS count FROM cache_metrics WHERE round_id = 0')
+  const pending = selectRows(
+    db,
+    'SELECT COUNT(*) AS count FROM cache_metrics WHERE round_id = 0',
+  ).at(0)
   if (!integer(pending?.count)) return
 
-  const [existing] = selectRows(
+  const existing = selectRows(
     db,
     "SELECT id FROM cache_rounds WHERE reason = 'legacy-import' ORDER BY id ASC LIMIT 1",
-  )
+  ).at(0)
 
   let legacyRoundId = integer(existing?.id)
   if (!legacyRoundId) {
-    const [bounds] = selectRows(
+    const bounds = selectRows(
       db,
       `
         SELECT
@@ -573,7 +630,7 @@ function backfillLegacyRound(db: SqlJsDatabase) {
         FROM cache_metrics
         WHERE round_id = 0
       `,
-    )
+    ).at(0)
     const startedAt = value(bounds?.started_at) || nowIso()
     const completedAt = value(bounds?.completed_at) || startedAt
     db.run(
@@ -593,15 +650,17 @@ function backfillLegacyRound(db: SqlJsDatabase) {
         integer(bounds?.recheck_rows),
       ],
     )
-    const [created] = selectRows(db, 'SELECT last_insert_rowid() AS id')
+    const created = selectRows(db, 'SELECT last_insert_rowid() AS id').at(0)
     legacyRoundId = integer(created?.id)
   }
 
-  db.run('UPDATE cache_metrics SET round_id = ? WHERE round_id = 0', [legacyRoundId])
+  db.run('UPDATE cache_metrics SET round_id = ? WHERE round_id = 0', [
+    legacyRoundId,
+  ])
 }
 
 function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
-  const [row] = selectRows(
+  const row = selectRows(
     db,
     `
       SELECT
@@ -611,7 +670,7 @@ function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
       WHERE round_id = ?
     `,
     [roundId],
-  )
+  ).at(0)
   return {
     totalRows: integer(row?.total_rows),
     recheckRows: integer(row?.recheck_rows),
@@ -619,7 +678,7 @@ function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
 }
 
 function pruneOldMetricRounds(db: SqlJsDatabase, keepDays: number) {
-  const keep = integer(keepDays, METRIC_RETENTION_DAYS)
+  const keep = integer(keepDays)
   if (keep <= 0) return
 
   const cutoffIso = new Date(Date.now() - keep * DAY_MS).toISOString()
@@ -666,7 +725,9 @@ function selectRows(db: SqlJsDatabase, sql: string, params: unknown[] = []) {
 }
 
 function metricRowFromDb(row: Record<string, unknown>): MetricRow {
-  return Object.fromEntries(METRIC_FIELDS.map((field) => [field, value(row[field])]))
+  return Object.fromEntries(
+    METRIC_FIELDS.map((field) => [field, value(row[field])]),
+  )
 }
 
 type MetricSqlFilter = {
@@ -684,11 +745,15 @@ function metricQueryWhere(
   const params: unknown[] = []
 
   if (range.sinceIso) {
-    clauses.push("timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)")
+    clauses.push(
+      "timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)",
+    )
     params.push(range.sinceIso)
   }
   if (range.untilIso) {
-    clauses.push("timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)")
+    clauses.push(
+      "timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)",
+    )
     params.push(range.untilIso)
   }
 
@@ -723,7 +788,9 @@ function metricQueryWhere(
 
   return {
     params,
-    where: clauses.length ? `WHERE ${clauses.map((clause) => `(${clause})`).join(' AND ')}` : '',
+    where: clauses.length
+      ? `WHERE ${clauses.map((clause) => `(${clause})`).join(' AND ')}`
+      : '',
   }
 }
 
@@ -775,7 +842,11 @@ function metricStatusValues(db: SqlJsDatabase, base: MetricSqlFilter) {
   return rows.map((row) => value(row.value)).filter(Boolean)
 }
 
-function appendMetricWhere(base: MetricSqlFilter, clause: string, params: unknown[] = []) {
+function appendMetricWhere(
+  base: MetricSqlFilter,
+  clause: string,
+  params: unknown[] = [],
+) {
   return {
     params: [...base.params, ...params],
     where: base.where ? `${base.where} AND (${clause})` : `WHERE (${clause})`,
@@ -835,7 +906,12 @@ function integer(input: unknown, fallback = 0) {
   return Number.isFinite(number) ? number : fallback
 }
 
-function boundedInteger(input: unknown, min: number, max: number, fallback: number) {
+function boundedInteger(
+  input: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+) {
   const number = integer(input, fallback)
   return Math.min(max, Math.max(min, number))
 }

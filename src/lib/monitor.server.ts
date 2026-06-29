@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
@@ -6,16 +7,21 @@ import {
   DEFAULT_METRICS_DB,
   finalizeMetricRound,
   normalizeMetricsOutput,
+  resolveMetricsDbPath,
   readMetricRowsPage,
   readMetricRows,
   readMetricRounds,
-  type MetricColumnSummary,
-  type MetricDateRange,
-  type MetricRowFilters,
-  type MetricRow,
-  type MetricRoundRow,
 } from './metrics-db'
-import { METRIC_RETENTION_DAYS, type MetricRangeDays } from './metric-range'
+import type {
+  MetricColumnSummary,
+  MetricDateRange,
+  MetricRowFilters,
+  MetricRow,
+  MetricRoundRow,
+} from './metrics-db'
+import { defaultMetricRangeDays } from './metric-range'
+import type { MetricRangeDays } from './metric-range'
+
 export { metricRangeDayOptions, type MetricRangeDays } from './metric-range'
 
 export type Config = {
@@ -78,9 +84,10 @@ export type DashboardPayload = {
 }
 
 const metricDayMs = 24 * 60 * 60 * 1000
-const dashboardMetricRowLimit = 1500
 const root = resolve(process.env.APP_ROOT || process.cwd())
-const storageDir = join(root, 'storage')
+const storageDir = resolve(
+  process.env.STORAGE_DIR || process.env.DATA_DIR || join(root, 'storage'),
+)
 const configPath = join(storageDir, 'dashboard-config.json')
 const runtimePath = join(storageDir, 'monitor-runtime.json')
 const pagesPath = join(storageDir, 'pages.txt')
@@ -165,7 +172,9 @@ async function readStoredMonitorState(): Promise<StoredMonitorState | null> {
   if (!(await exists(runtimePath))) return null
 
   try {
-    return normalizeStoredMonitorState(JSON.parse(await readFile(runtimePath, 'utf8')))
+    return normalizeStoredMonitorState(
+      JSON.parse(await readFile(runtimePath, 'utf8')),
+    )
   } catch (error) {
     pushLog(`runtime state read failed: ${errorMessage(error)}`)
     return null
@@ -195,7 +204,8 @@ function persistMonitorStateSoon() {
 }
 
 function normalizeStoredMonitorState(value: unknown): StoredMonitorState {
-  const row = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const row =
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   return {
     running: Boolean(row.running),
     startedAt: nullableString(row.startedAt),
@@ -214,11 +224,15 @@ export async function readConfig(): Promise<Config> {
     return defaultConfig
   }
 
-  const stored = JSON.parse(await readFile(configPath, 'utf8')) as Partial<Config>
+  const stored = JSON.parse(
+    await readFile(configPath, 'utf8'),
+  ) as Partial<Config>
   return sanitizeConfig({ ...defaultConfig, ...stored })
 }
 
-export function sanitizeConfig(value: Partial<Config> & { baseUrl?: string }): Config {
+export function sanitizeConfig(
+  value: Partial<Config> & { baseUrl?: string },
+): Config {
   const { baseUrl: _baseUrl, ...configValue } = value
   const legacyBaseUrl = String(value.baseUrl || legacyDefaultBaseUrl).trim()
   const roundIntervalSeconds = clamp(
@@ -241,9 +255,18 @@ export function sanitizeConfig(value: Partial<Config> & { baseUrl?: string }): C
     delay: clamp(Number(value.delay), 0, 60, 0),
     roundIntervalSeconds,
     hitIntervalSeconds: roundIntervalSeconds,
-    missIntervalSeconds: clamp(Number(value.missIntervalSeconds), 15, 86400, 120),
-    output: normalizeMetricsOutput(String(value.output || defaultConfig.output).trim()),
-    proxyCountries: String(value.proxyCountries || defaultConfig.proxyCountries).trim(),
+    missIntervalSeconds: clamp(
+      Number(value.missIntervalSeconds),
+      15,
+      86400,
+      120,
+    ),
+    output: normalizeMetricsOutput(
+      String(value.output || defaultConfig.output).trim(),
+    ),
+    proxyCountries: String(
+      value.proxyCountries || defaultConfig.proxyCountries,
+    ).trim(),
     userAgent: String(value.userAgent || defaultConfig.userAgent).trim(),
     noDirect: Boolean(value.noDirect),
     noProxySource: Boolean(value.noProxySource),
@@ -280,7 +303,9 @@ export async function saveProxies(text: string) {
   return { ok: true }
 }
 
-export async function getDashboard(days: MetricRangeDays): Promise<DashboardPayload> {
+export async function getDashboard(
+  days: MetricRangeDays,
+): Promise<DashboardPayload> {
   const config = await readConfig()
   const [metrics, proxies] = await Promise.all([
     buildMetrics(config, metricRange(days)),
@@ -355,13 +380,19 @@ export async function runOnce() {
   return snapshotState()
 }
 
-function normalizeTargetUrl(value: string, legacyBaseUrl = legacyDefaultBaseUrl) {
+function normalizeTargetUrl(
+  value: string,
+  legacyBaseUrl = legacyDefaultBaseUrl,
+) {
   if (!value) return ''
   try {
     return new URL(value).toString()
   } catch {
     try {
-      return new URL(value.replace(/^\/+/, ''), legacyBaseUrl.replace(/\/?$/, '/')).toString()
+      return new URL(
+        value.replace(/^\/+/, ''),
+        legacyBaseUrl.replace(/\/?$/, '/'),
+      ).toString()
     } catch {
       return value
     }
@@ -377,7 +408,9 @@ async function ensureRunFiles(config: Config) {
   await mkdir(storageDir, { recursive: true })
   await writeFile(pagesPath, `${config.pages.join('\n')}\n`, 'utf8')
   if (!(await exists(proxiesPath))) await writeFile(proxiesPath, '', 'utf8')
-  await mkdir(dirname(join(root, config.output)), { recursive: true })
+  await mkdir(dirname(resolveMetricsDbPath(config.output, root)), {
+    recursive: true,
+  })
 }
 
 async function readProxyText() {
@@ -390,19 +423,27 @@ function pushLog(line: string) {
   state.logs = state.logs.slice(-160)
 }
 
-async function snapshotState(config?: Config, rounds: MetricRoundRow[] = []): Promise<MonitorState> {
+async function snapshotState(
+  config?: Config,
+  rounds: MetricRoundRow[] = [],
+): Promise<MonitorState> {
   const stored = await readStoredMonitorState()
   const activeRound = activeMetricRound(rounds)
-  const activeRoundArmed = activeRound ? roundKeepsMonitorArmed(activeRound) : false
+  const activeRoundArmed = activeRound
+    ? roundKeepsMonitorArmed(activeRound)
+    : false
   const storedRunning = Boolean(stored?.running || activeRoundArmed)
   const running = state.running || storedRunning
   const busy = state.busy || Boolean(activeRound)
 
   if (storedRunning && !state.running) {
     state.running = true
-    state.startedAt = state.startedAt || stored?.startedAt || activeRound?.started_at || null
-    state.lastRunAt = state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null
-    state.lastReason = state.lastReason || activeRound?.reason || stored?.lastReason || null
+    state.startedAt =
+      state.startedAt || stored?.startedAt || activeRound?.started_at || null
+    state.lastRunAt =
+      state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null
+    state.lastReason =
+      state.lastReason || activeRound?.reason || stored?.lastReason || null
     state.nextRunAt = state.nextRunAt || stored?.nextRunAt || null
     if (activeRoundArmed && !stored?.running) persistMonitorStateSoon()
   }
@@ -417,18 +458,26 @@ async function snapshotState(config?: Config, rounds: MetricRoundRow[] = []): Pr
     busy,
     round: state.round || activeRound?.id || 0,
     crawl: state.busy && state.crawl ? { ...state.crawl } : null,
-    startedAt: state.startedAt || activeRound?.started_at || stored?.startedAt || null,
-    lastRunAt: state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null,
-    nextRunAt: busy ? null : state.nextRunAt || (running ? stored?.nextRunAt || null : null),
+    startedAt:
+      state.startedAt || activeRound?.started_at || stored?.startedAt || null,
+    lastRunAt:
+      state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null,
+    nextRunAt: busy
+      ? null
+      : state.nextRunAt || (running ? stored?.nextRunAt || null : null),
     lastExitCode: state.lastExitCode ?? stored?.lastExitCode ?? null,
-    lastReason: state.lastReason || activeRound?.reason || stored?.lastReason || null,
-    lastError: state.lastError || activeRound?.error || stored?.lastError || null,
+    lastReason:
+      state.lastReason || activeRound?.reason || stored?.lastReason || null,
+    lastError:
+      state.lastError || activeRound?.error || stored?.lastError || null,
     logs: [...state.logs],
   }
 }
 
 function activeMetricRound(rounds: MetricRoundRow[]) {
-  return rounds.find((round) => round.status === 'running' && !staleMetricRound(round))
+  return rounds.find(
+    (round) => round.status === 'running' && !staleMetricRound(round),
+  )
 }
 
 function roundKeepsMonitorArmed(round: MetricRoundRow) {
@@ -440,15 +489,21 @@ function staleMetricRound(round: MetricRoundRow) {
   return Number.isFinite(started) && Date.now() - started > activeRoundMaxAgeMs
 }
 
-async function pipeProcessOutput(stream: NodeJS.ReadableStream | null, label = '') {
+async function pipeProcessOutput(
+  stream: NodeJS.ReadableStream | null,
+  label = '',
+) {
   if (!stream) return
 
   const decoder = new TextDecoder()
   let buffer = ''
 
-  await new Promise<void>((resolve, reject) => {
+  await new Promise<void>((done, reject) => {
     stream.on('data', (value: Buffer | string) => {
-      buffer += typeof value === 'string' ? value : decoder.decode(value, { stream: true })
+      buffer +=
+        typeof value === 'string'
+          ? value
+          : decoder.decode(value, { stream: true })
       const lines = buffer.split(/\r?\n/)
       buffer = lines.pop() || ''
 
@@ -462,12 +517,12 @@ async function pipeProcessOutput(stream: NodeJS.ReadableStream | null, label = '
 
     stream.on('error', reject)
     stream.on('end', () => {
-    buffer += decoder.decode()
-    if (buffer.trim()) {
-      recordCrawlProgress(buffer)
-      pushLog(label ? `${label}${buffer}` : buffer)
-    }
-      resolve()
+      buffer += decoder.decode()
+      if (buffer.trim()) {
+        recordCrawlProgress(buffer)
+        pushLog(label ? `${label}${buffer}` : buffer)
+      }
+      done()
     })
   })
 }
@@ -528,8 +583,10 @@ async function runMonitorRound(reason: string) {
     state.crawl = { ...state.crawl, round: roundId }
     persistMonitorStateSoon()
 
-    if (stopRequested) {
-      pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped before collector start`)
+    if (isStopRequested()) {
+      pushLog(
+        `[${new Date().toLocaleString()}] round ${roundId} stopped before collector start`,
+      )
       await finalizeMetricRound(
         config.output,
         roundId,
@@ -542,7 +599,9 @@ async function runMonitorRound(reason: string) {
     const args = monitorProcessArgs(config, roundId, reason)
     const started = new Date()
     state.lastRunAt = started.toISOString()
-    pushLog(`[${started.toLocaleString()}] round ${roundId} started (${reason})`)
+    pushLog(
+      `[${started.toLocaleString()}] round ${roundId} started (${reason})`,
+    )
     pushLog(
       `collector args: ${args
         .map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))
@@ -551,19 +610,23 @@ async function runMonitorRound(reason: string) {
 
     proc = spawn(process.execPath, args, {
       cwd: root,
+      env: { ...process.env, STORAGE_DIR: storageDir },
     })
-    activeMonitorProcess = proc
+    const monitorProcess = proc
+    activeMonitorProcess = monitorProcess
 
     const [exitCode] = await Promise.all([
-      new Promise<number>((resolve) => proc?.once('exit', (code) => resolve(code ?? 1))),
-      pipeProcessOutput(proc.stdout),
-      pipeProcessOutput(proc.stderr, 'stderr: '),
+      new Promise<number>((done) =>
+        monitorProcess.once('exit', (code) => done(code ?? 1)),
+      ),
+      pipeProcessOutput(monitorProcess.stdout),
+      pipeProcessOutput(monitorProcess.stderr, 'stderr: '),
     ])
 
     state.lastExitCode = exitCode
 
     if (exitCode !== 0) {
-      if (stopRequested) {
+      if (isStopRequested()) {
         pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped`)
         await finalizeMetricRound(
           config.output,
@@ -582,7 +645,12 @@ async function runMonitorRound(reason: string) {
         )
       }
     } else {
-      await finalizeMetricRound(config.output, roundId, { status: 'completed' }, root)
+      await finalizeMetricRound(
+        config.output,
+        roundId,
+        { status: 'completed' },
+        root,
+      )
       pushLog(`[${new Date().toLocaleString()}] round ${roundId} finished`)
     }
   } catch (error) {
@@ -697,22 +765,33 @@ async function scheduleNext(config: Config) {
   state.nextRunAt = next.toISOString()
   pushLog(`[${new Date().toLocaleString()}] next run in ${delay}s`)
 
-  scheduledJob = setTimeout(() => {
-    scheduledJob = null
-    void runMonitorRound('schedule')
-  }, Math.max(0, next.getTime() - Date.now()))
+  scheduledJob = setTimeout(
+    () => {
+      scheduledJob = null
+      void runMonitorRound('schedule')
+    },
+    Math.max(0, next.getTime() - Date.now()),
+  )
   await persistMonitorState()
 }
 
-async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION_DAYS)) {
+function isStopRequested() {
+  return stopRequested
+}
+
+async function buildMetrics(
+  config: Config,
+  range = metricRange(defaultMetricRangeDays),
+) {
   const rows = (
     await readMetricRows(config.output, root, {
-      limit: dashboardMetricRowLimit,
       order: 'desc',
       sinceIso: range.sinceIso,
     })
   ).reverse()
-  const rounds = await readMetricRounds(config.output, root, { sinceIso: range.sinceIso })
+  const rounds = await readMetricRounds(config.output, root, {
+    sinceIso: range.sinceIso,
+  })
   const timeColumns = metricTimeColumns(rows)
   const latest = new Map<string, MetricRow>()
 
@@ -723,13 +802,19 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
     }
     const key = `${normalizedRow.page}|${normalizedRow.proxy_country}`
     const existing = latest.get(key)
-    if (!existing || Date.parse(normalizedRow.timestamp_utc) >= Date.parse(existing.timestamp_utc)) {
+    if (
+      !existing ||
+      Date.parse(normalizedRow.timestamp_utc) >=
+        Date.parse(existing.timestamp_utc)
+    ) {
       latest.set(key, normalizedRow)
     }
   }
 
   const latestRows = [...latest.values()].sort((a, b) =>
-    `${a.page}|${a.proxy_country}`.localeCompare(`${b.page}|${b.proxy_country}`),
+    `${a.page}|${a.proxy_country}`.localeCompare(
+      `${b.page}|${b.proxy_country}`,
+    ),
   )
   const configuredCountries = config.proxyCountries
     .split(',')
@@ -741,16 +826,37 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
       ...configuredCountries,
       ...latestRows.map((row) => row.proxy_country || 'unknown'),
     ]),
-  ].sort((a, b) => (a === 'direct' ? -1 : b === 'direct' ? 1 : a.localeCompare(b)))
-  const pages = [...new Set([...config.pages, ...latestRows.map((row) => row.page)].filter(Boolean))]
+  ].sort((a, b) =>
+    a === 'direct' ? -1 : b === 'direct' ? 1 : a.localeCompare(b),
+  )
+  const pages = [
+    ...new Set(
+      [...config.pages, ...latestRows.map((row) => row.page)].filter(Boolean),
+    ),
+  ]
   const pageStats = pages.map((page) => {
     const pageRows = latestRows.filter((row) => row.page === page)
-    const hitCount = pageRows.filter((row) => row.cf_cache_status === 'HIT').length
+    const hitCount = pageRows.filter(
+      (row) => row.cf_cache_status === 'HIT',
+    ).length
     const missLike = pageRows.filter((row) => isMissLike(row)).length
     const errors = pageRows.filter((row) => row.error).length
-    const maxAge = Math.max(0, ...pageRows.map((row) => Number(row.age_seconds) || 0))
-    const avgMs = average(pageRows.map((row) => Number(row.response_ms)).filter(Number.isFinite))
-    return { page, hitCount, missLike, errors, maxAge, avgMs, total: pageRows.length }
+    const maxAge = Math.max(
+      0,
+      ...pageRows.map((row) => Number(row.age_seconds) || 0),
+    )
+    const avgMs = average(
+      pageRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
+    )
+    return {
+      page,
+      hitCount,
+      missLike,
+      errors,
+      maxAge,
+      avgMs,
+      total: pageRows.length,
+    }
   })
   const matrix = pages.map((page) => ({
     page,
@@ -764,11 +870,17 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
       rounds.reduce((sum, round) => sum + round.total_rows, 0),
     ),
     latestCells: latestRows.length,
-    latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT').length,
+    latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT')
+      .length,
     latestMissLike: latestRows.filter(isMissLike).length,
     latestErrors: latestRows.filter((row) => row.error).length,
-    maxAge: Math.max(0, ...latestRows.map((row) => Number(row.age_seconds) || 0)),
-    avgResponseMs: average(latestRows.map((row) => Number(row.response_ms)).filter(Number.isFinite)),
+    maxAge: Math.max(
+      0,
+      ...latestRows.map((row) => Number(row.age_seconds) || 0),
+    ),
+    avgResponseMs: average(
+      latestRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
+    ),
     lastTimestamp: rows.at(-1)?.timestamp_utc || null,
   }
 
@@ -784,8 +896,13 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
     summary,
     range: {
       ...range,
-      availableFrom: rows[0]?.timestamp_utc || rounds.at(-1)?.started_at || null,
-      availableTo: rows.at(-1)?.timestamp_utc || rounds[0]?.completed_at || rounds[0]?.started_at || null,
+      availableFrom:
+        rows[0]?.timestamp_utc || rounds.at(-1)?.started_at || null,
+      availableTo:
+        rows.at(-1)?.timestamp_utc ||
+        rounds[0]?.completed_at ||
+        rounds[0]?.started_at ||
+        null,
     },
   }
 }
@@ -812,12 +929,18 @@ function metricColumnsFromSummaries(summaries: MetricColumnSummary[]) {
 function metricRange(days: MetricRangeDays) {
   return {
     days,
-    sinceIso: new Date(Date.now() - days * metricDayMs).toISOString(),
-  } satisfies MetricDateRange & { days: MetricRangeDays; sinceIso: string }
+    sinceIso:
+      days === 'all'
+        ? undefined
+        : new Date(Date.now() - days * metricDayMs).toISOString(),
+  } satisfies MetricDateRange & { days: MetricRangeDays }
 }
 
 function metricTimeColumns(rows: MetricRow[]) {
-  const columns = new Map<string, MetricTimeColumn & { start: number; end: number }>()
+  const columns = new Map<
+    string,
+    MetricTimeColumn & { start: number; end: number }
+  >()
   for (const row of rows) {
     const column = metricBatchColumn(row)
     const time = Date.parse(row.timestamp_utc || '')
@@ -842,7 +965,12 @@ function metricTimeColumns(rows: MetricRow[]) {
 function metricTimeColumn(value: string): MetricTimeColumn {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
-    return { key: 'unknown', label: '-', meta: 'No time', sort: Number.MAX_SAFE_INTEGER }
+    return {
+      key: 'unknown',
+      label: '-',
+      meta: 'No time',
+      sort: Number.MAX_SAFE_INTEGER,
+    }
   }
 
   const key = [
@@ -884,15 +1012,24 @@ function metricBatchColumn(row: MetricRow): MetricTimeColumn {
 function batchTimeRange(start: number, end: number) {
   if (start === Number.MAX_SAFE_INTEGER) return 'No time'
   const middleDate = new Date(start + (end - start) / 2)
-  const middleLabel = middleDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const middleLabel = middleDate.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
   return `${middleLabel}, ${middleDate.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
 }
 
 function isMissLike(row: MetricRow) {
   const status = (row.cf_cache_status || '').toUpperCase()
-  return ['MISS', 'BYPASS', 'DYNAMIC', 'EXPIRED', 'REVALIDATED', 'STALE', 'UPDATING'].includes(
-    status,
-  )
+  return [
+    'MISS',
+    'BYPASS',
+    'DYNAMIC',
+    'EXPIRED',
+    'REVALIDATED',
+    'STALE',
+    'UPDATING',
+  ].includes(status)
 }
 
 function normalizeCountry(country: string) {
@@ -916,7 +1053,9 @@ function normalizeCountry(country: string) {
 
 function average(values: number[]) {
   if (!values.length) return 0
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+  return Math.round(
+    values.reduce((sum, value) => sum + value, 0) / values.length,
+  )
 }
 
 function errorMessage(error: unknown) {

@@ -1,5 +1,10 @@
 import { Save } from 'lucide-react'
-import { countryName, normalizeList, shortDate, statusToneFromValue } from '../helpers'
+import {
+  countryName,
+  normalizeList,
+  shortDate,
+  statusToneFromValue,
+} from '../helpers'
 import type { ProxiesPanelProps, UsedProxyRow } from '../types'
 
 export function ProxiesPanel(props: ProxiesPanelProps) {
@@ -31,7 +36,10 @@ export function ProxiesPanel(props: ProxiesPanelProps) {
             </tbody>
           </table>
         ) : (
-          <div className="empty-state">No proxy usage recorded yet. Run the monitor once to populate this list.</div>
+          <div className="empty-state">
+            No proxy usage recorded yet. Run the monitor once to populate this
+            list.
+          </div>
         )}
       </div>
       <div className="section-head">
@@ -46,7 +54,11 @@ export function ProxiesPanel(props: ProxiesPanelProps) {
         onChange={(event) => props.setProxyText(event.target.value)}
       />
       <div className="form-actions">
-        <button className="button primary icon-text" disabled={props.saving} type="submit">
+        <button
+          className="button primary icon-text"
+          disabled={props.saving}
+          type="submit"
+        >
           <Save size={18} />
           <span>{props.saving ? 'Saving...' : 'Save Proxies'}</span>
         </button>
@@ -65,7 +77,11 @@ function ProxyRow({ row }: { row: UsedProxyRow }) {
       <td>{countryName(row.country)}</td>
       <td>{row.source}</td>
       <td>
-        <strong className={`status-pill ${statusToneFromValue(row.status, row.error)}`}>{row.status}</strong>
+        <strong
+          className={`status-pill ${statusToneFromValue(row.status, row.error)}`}
+        >
+          {row.status}
+        </strong>
       </td>
       <td>{row.responseMs ? `${row.responseMs} ms` : '-'}</td>
       <td>{row.timestamp ? shortDate(row.timestamp) : '-'}</td>

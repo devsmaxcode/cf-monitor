@@ -7,7 +7,6 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import type { ColumnDef } from '@tanstack/react-table'
-import type { MetricRangeDays } from '#/lib/monitor.server'
 import type { MetricTimeColumn, MetricTimeGroup } from '../helpers'
 import {
   cacheStatus,
@@ -19,6 +18,7 @@ import {
   matrixCountryColWidth,
   matrixTimeColWidth,
   matrixUrlColWidth,
+  parseMetricRangeDays,
   rangeOptions,
   statusMeta,
   statusTone,
@@ -68,7 +68,9 @@ export function MetricsPanel(props: MetricsPanelProps) {
   const safePage = Math.min(props.pageIndex, pageCount)
   const start = props.totalGroups ? (safePage - 1) * props.pageSize : 0
   const pageGroups = groups
-  const end = props.totalGroups ? Math.min(start + pageGroups.length, props.totalGroups) : 0
+  const end = props.totalGroups
+    ? Math.min(start + pageGroups.length, props.totalGroups)
+    : 0
   const tableColumns = useMetricMatrixColumns(columns)
   const table = useReactTable({
     columns: tableColumns,
@@ -118,7 +120,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
           <select
             aria-label="Round timeframe"
             onChange={(event) =>
-              props.setRangeDays(Number(event.target.value) as MetricRangeDays)
+              props.setRangeDays(parseMetricRangeDays(event.target.value))
             }
             value={props.rangeDays}
           >
@@ -191,11 +193,17 @@ export function MetricsPanel(props: MetricsPanelProps) {
       {mounted && (!props.loading || pageGroups.length) ? (
         <>
           {pageGroups.length ? (
-            <div className="table-scroll metric-table-scroll" style={tableStyle}>
+            <div
+              className="table-scroll metric-table-scroll"
+              style={tableStyle}
+            >
               <table className="sample-table metric-matrix">
                 <colgroup>
                   {table.getAllLeafColumns().map((column) => (
-                    <col className={matrixColumnClass(column.id)} key={column.id} />
+                    <col
+                      className={matrixColumnClass(column.id)}
+                      key={column.id}
+                    />
                   ))}
                 </colgroup>
                 <thead>
@@ -209,7 +217,10 @@ export function MetricsPanel(props: MetricsPanelProps) {
                         >
                           {header.isPlaceholder
                             ? null
-                            : flexRender(header.column.columnDef.header, header.getContext())}
+                            : flexRender(
+                                header.column.columnDef.header,
+                                header.getContext(),
+                              )}
                         </th>
                       ))}
                     </tr>
@@ -220,14 +231,23 @@ export function MetricsPanel(props: MetricsPanelProps) {
                     <tr key={row.id}>
                       {row.getVisibleCells().map((cell) => {
                         const cellClass = matrixCellClass(cell.column.id)
-                        const title = matrixCellTitle(cell.column.id, row.original)
+                        const title = matrixCellTitle(
+                          cell.column.id,
+                          row.original,
+                        )
                         return cell.column.id === 'url' ? (
                           <th className={cellClass} key={cell.id} title={title}>
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            {flexRender(
+                              cell.column.columnDef.cell,
+                              cell.getContext(),
+                            )}
                           </th>
                         ) : (
                           <td className={cellClass} key={cell.id} title={title}>
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            {flexRender(
+                              cell.column.columnDef.cell,
+                              cell.getContext(),
+                            )}
                           </td>
                         )
                       })}
@@ -265,14 +285,17 @@ export function MetricsPanel(props: MetricsPanelProps) {
               </div>
             </div>
             <span className="pagination-range">
-              Showing {props.totalGroups ? start + 1 : 0}-{end} of {props.totalGroups}
+              Showing {props.totalGroups ? start + 1 : 0}-{end} of{' '}
+              {props.totalGroups}
             </span>
             <div className="page-controls">
               <button
                 aria-label="Previous page"
                 className="icon-button compact"
                 disabled={safePage <= 1}
-                onClick={() => props.setPageIndex((value) => Math.max(1, value - 1))}
+                onClick={() =>
+                  props.setPageIndex((value) => Math.max(1, value - 1))
+                }
                 title="Previous page"
                 type="button"
               >
@@ -316,8 +339,10 @@ function useMetricMatrixColumns(columns: MetricTimeColumn[]) {
         header: 'Countries',
         id: 'country',
       },
-      ...columns.map((column) => ({
-        cell: ({ row }) => <MetricStatusCellContent row={row.original.cells.get(column.key)} />,
+      ...columns.map<ColumnDef<MetricTimeGroup>>((column) => ({
+        cell: ({ row }) => (
+          <MetricStatusCellContent row={row.original.cells.get(column.key)} />
+        ),
         header: () => <MetricTimeHeader column={column} />,
         id: column.key,
       })),

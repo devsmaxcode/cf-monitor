@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import type { Config, MetricsPagePayload } from '#/lib/monitor.server'
 import { getMetricRowsPageFn } from '#/lib/monitor.functions'
 import { unique, usedProxyRows } from './helpers'
@@ -20,26 +21,42 @@ export function useMetricsConsumer() {
   const [cacheStatus, setCacheStatus] = useState('')
   const [pageIndex, setPageIndex] = useState(1)
   const [pageSize, setPageSizeState] = useState(50)
-  const [pagedMetrics, setPagedMetrics] = useState<MetricsPagePayload | null>(null)
+  const [pagedMetrics, setPagedMetrics] = useState<MetricsPagePayload | null>(
+    null,
+  )
   const [loading, setLoading] = useState(true)
   const [pageError, setPageError] = useState('')
 
   const countries = useMemo(
-    () => pagedMetrics?.countries ?? unique(metrics.rows.map((row) => row.proxy_country || 'unknown')),
+    () =>
+      pagedMetrics?.countries ??
+      unique(metrics.rows.map((row) => row.proxy_country || 'unknown')),
     [metrics.rows, pagedMetrics?.countries],
   )
   const pages = useMemo(
-    () => pagedMetrics?.pages ?? unique(metrics.rows.map((row) => row.page || '').filter(Boolean)),
+    () =>
+      pagedMetrics?.pages ??
+      unique(metrics.rows.map((row) => row.page || '').filter(Boolean)),
     [metrics.rows, pagedMetrics?.pages],
   )
   const statuses = useMemo(
     () =>
       pagedMetrics?.statuses ??
-      unique(metrics.rows.map((row) => (row.cf_cache_status || (row.error ? 'FAIL' : '-')).toUpperCase())),
+      unique(
+        metrics.rows.map((row) =>
+          (row.cf_cache_status || (row.error ? 'FAIL' : '-')).toUpperCase(),
+        ),
+      ),
     [metrics.rows, pagedMetrics?.statuses],
   )
   const filters = useMemo(
-    () => ({ cacheStatus, country, page: pageFilter, query } satisfies MetricFilters),
+    () =>
+      ({
+        cacheStatus,
+        country,
+        page: pageFilter,
+        query,
+      }) satisfies MetricFilters,
     [cacheStatus, country, pageFilter, query],
   )
 
@@ -60,7 +77,8 @@ export function useMetricsConsumer() {
         if (active) setPagedMetrics(payload)
       })
       .catch((error: unknown) => {
-        if (active) setPageError(error instanceof Error ? error.message : String(error))
+        if (active)
+          setPageError(error instanceof Error ? error.message : String(error))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -133,7 +151,10 @@ export function useAgeConsumer() {
 export function useRoundsConsumer() {
   const { config, metrics, rangeDays, status } = useDashboardData()
   const [selectedRoundId, setSelectedRoundId] = useState<number | null>(null)
-  const selectedRound = metrics.rounds.find((round) => round.id === selectedRoundId) ?? metrics.rounds[0] ?? null
+  const selectedRound =
+    metrics.rounds.find((round) => round.id === selectedRoundId) ??
+    metrics.rounds.at(0) ??
+    null
 
   return {
     config,
@@ -167,7 +188,9 @@ export function useConfigConsumer() {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    void saveConfigDraft(draft).then(() => setDirty(false)).catch(() => undefined)
+    void saveConfigDraft(draft)
+      .then(() => setDirty(false))
+      .catch(() => undefined)
   }
 
   return { draft, onChange, onSubmit, saving }
@@ -178,7 +201,10 @@ export function useProxiesConsumer() {
   const { saveProxyDraft, saving, setDirtyPanel } = useDashboardActions()
   const [draft, setDraft] = useState(proxyText)
   const [dirty, setDirty] = useState(false)
-  const proxyRows = useMemo(() => usedProxyRows(metrics.rows, proxyText), [metrics.rows, proxyText])
+  const proxyRows = useMemo(
+    () => usedProxyRows(metrics.rows, proxyText),
+    [metrics.rows, proxyText],
+  )
 
   useEffect(() => {
     if (dirty) return
@@ -195,7 +221,9 @@ export function useProxiesConsumer() {
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    void saveProxyDraft(draft).then(() => setDirty(false)).catch(() => undefined)
+    void saveProxyDraft(draft)
+      .then(() => setDirty(false))
+      .catch(() => undefined)
   }
 
   return { proxyRows, proxyText: draft, saving, setProxyText, submit }

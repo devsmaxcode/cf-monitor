@@ -1,12 +1,14 @@
 import { useState } from 'react'
-import { defaultMetricRangeDays, type MetricRangeDays } from '#/lib/metric-range'
-import { isMetricRangeDays } from './helpers'
+import { defaultMetricRangeDays } from '#/lib/metric-range'
+import type { MetricRangeDays } from '#/lib/metric-range'
+import { parseMetricRangeDays } from './helpers'
 
 export function useStoredRange() {
   const [range, setRange] = useState<MetricRangeDays>(() => {
     if (typeof window === 'undefined') return defaultMetricRangeDays
-    const stored = Number(window.localStorage.getItem('cf-monitor-range-days'))
-    return isMetricRangeDays(stored) ? stored : defaultMetricRangeDays
+    return parseMetricRangeDays(
+      window.localStorage.getItem('cf-monitor-range-days') || '',
+    )
   })
 
   const setStoredRange = (value: MetricRangeDays) => {

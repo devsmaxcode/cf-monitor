@@ -5,7 +5,7 @@ import { Check } from '../ui'
 import type { ConfigPanelProps } from '../types'
 
 export function ConfigPanel(props: ConfigPanelProps) {
-  const update = <K extends keyof Config>(key: K, value: Config[K]) =>
+  const update = <TKey extends keyof Config>(key: TKey, value: Config[TKey]) =>
     props.onChange({ ...props.draft, [key]: value })
   const summary = configSummary(props.draft)
   const countries = normalizeList(props.draft.proxyCountries)
@@ -51,7 +51,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                   <input
                     spellCheck={false}
                     value={props.draft.userAgent}
-                    onChange={(event) => update('userAgent', event.target.value)}
+                    onChange={(event) =>
+                      update('userAgent', event.target.value)
+                    }
                   />
                 </label>
               </div>
@@ -59,10 +61,15 @@ export function ConfigPanel(props: ConfigPanelProps) {
                 Target URLs
                 <textarea
                   className="config-textarea-large"
-                  rows={Math.min(18, Math.max(10, props.draft.pages.length + 2))}
+                  rows={Math.min(
+                    18,
+                    Math.max(10, props.draft.pages.length + 2),
+                  )}
                   spellCheck={false}
                   value={props.draft.pages.join('\n')}
-                  onChange={(event) => update('pages', normalizeList(event.target.value))}
+                  onChange={(event) =>
+                    update('pages', normalizeList(event.target.value))
+                  }
                 />
               </label>
             </section>
@@ -85,7 +92,12 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     rows={6}
                     spellCheck={false}
                     value={countries.join('\n')}
-                    onChange={(event) => update('proxyCountries', normalizeList(event.target.value).join(','))}
+                    onChange={(event) =>
+                      update(
+                        'proxyCountries',
+                        normalizeList(event.target.value).join(','),
+                      )
+                    }
                   />
                 </label>
                 <label>
@@ -95,7 +107,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     min={1}
                     type="number"
                     value={props.draft.maxProxiesPerCountry}
-                    onChange={(event) => update('maxProxiesPerCountry', Number(event.target.value))}
+                    onChange={(event) =>
+                      update('maxProxiesPerCountry', Number(event.target.value))
+                    }
                   />
                 </label>
               </div>
@@ -122,7 +136,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     step={15}
                     type="number"
                     value={props.draft.roundIntervalSeconds}
-                    onChange={(event) => update('roundIntervalSeconds', Number(event.target.value))}
+                    onChange={(event) =>
+                      update('roundIntervalSeconds', Number(event.target.value))
+                    }
                   />
                 </label>
                 <label>
@@ -132,7 +148,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     min={1}
                     type="number"
                     value={props.draft.timeout}
-                    onChange={(event) => update('timeout', Number(event.target.value))}
+                    onChange={(event) =>
+                      update('timeout', Number(event.target.value))
+                    }
                   />
                 </label>
                 <label>
@@ -142,7 +160,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     min={0}
                     type="number"
                     value={props.draft.delay}
-                    onChange={(event) => update('delay', Number(event.target.value))}
+                    onChange={(event) =>
+                      update('delay', Number(event.target.value))
+                    }
                   />
                 </label>
               </div>
@@ -159,10 +179,26 @@ export function ConfigPanel(props: ConfigPanelProps) {
                 </div>
               </div>
               <div className="switches">
-                <Check checked={props.draft.shuffleProxies} label="Shuffle proxies" onChange={(value) => update('shuffleProxies', value)} />
-                <Check checked={!props.draft.noDirect} label="Direct request" onChange={(value) => update('noDirect', !value)} />
-                <Check checked={!props.draft.noProxySource} label="Proxifly source" onChange={(value) => update('noProxySource', !value)} />
-                <Check checked={!props.draft.noClarketmSource} label="Clarketm source" onChange={(value) => update('noClarketmSource', !value)} />
+                <Check
+                  checked={props.draft.shuffleProxies}
+                  label="Shuffle proxies"
+                  onChange={(value) => update('shuffleProxies', value)}
+                />
+                <Check
+                  checked={!props.draft.noDirect}
+                  label="Direct request"
+                  onChange={(value) => update('noDirect', !value)}
+                />
+                <Check
+                  checked={!props.draft.noProxySource}
+                  label="Proxifly source"
+                  onChange={(value) => update('noProxySource', !value)}
+                />
+                <Check
+                  checked={!props.draft.noClarketmSource}
+                  label="Clarketm source"
+                  onChange={(value) => update('noClarketmSource', !value)}
+                />
               </div>
             </section>
           </div>
@@ -171,7 +207,11 @@ export function ConfigPanel(props: ConfigPanelProps) {
 
       <div className="form-actions">
         <span className="config-error" hidden />
-        <button className="button primary icon-text" disabled={props.saving} type="submit">
+        <button
+          className="button primary icon-text"
+          disabled={props.saving}
+          type="submit"
+        >
           <Save size={18} />
           <span>{props.saving ? 'Saving...' : 'Save Configuration'}</span>
         </button>
@@ -192,7 +232,11 @@ function configSummary(config: Config) {
       }
     }),
   ).length
-  const sources = [!config.noDirect, !config.noProxySource, !config.noClarketmSource].filter(Boolean).length
+  const sources = [
+    !config.noDirect,
+    !config.noProxySource,
+    !config.noClarketmSource,
+  ].filter(Boolean).length
 
   return {
     cells: config.pages.length * locations,

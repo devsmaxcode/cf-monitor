@@ -5,7 +5,10 @@ import serverEntry from '../dist/server/server.js'
 const root = resolve(process.env.APP_ROOT || process.cwd())
 const clientDir = resolve(root, 'dist/client')
 const hostname = process.env.HOST || process.env.APP_HOST || '127.0.0.1'
-const port = Number.parseInt(process.env.PORT || process.env.APP_PORT || '3033', 10)
+const port = Number.parseInt(
+  process.env.PORT || process.env.APP_PORT || '3033',
+  10,
+)
 
 if (!Number.isFinite(port)) {
   throw new Error(`Invalid PORT: ${process.env.PORT || process.env.APP_PORT}`)
@@ -43,7 +46,9 @@ async function serveStatic(request) {
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
   }
 
-  return new Response(request.method === 'HEAD' ? null : Bun.file(filePath), { headers })
+  return new Response(request.method === 'HEAD' ? null : Bun.file(filePath), {
+    headers,
+  })
 }
 
 Bun.serve({

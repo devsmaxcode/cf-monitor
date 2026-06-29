@@ -1,4 +1,5 @@
-import { metricRangeDayOptions, type MetricRangeDays } from '#/lib/metric-range'
+import { metricRangeDayOptions } from '#/lib/metric-range'
+import type { MetricRangeDays } from '#/lib/metric-range'
 import type { Config } from '#/lib/monitor.server'
 import type { MetricFilters, MetricRow, UsedProxyRow } from './types'
 
@@ -7,7 +8,20 @@ export const dayMs = 24 * 60 * 60 * 1000
 export const matrixUrlColWidth = 260
 export const matrixCountryColWidth = 150
 export const matrixTimeColWidth = 122
-const monthLabels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const
+const monthLabels = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const
 
 export type MetricTimeColumn = {
   key: string
@@ -65,7 +79,10 @@ export function filterRows(rows: MetricRow[], filters: MetricFilters) {
   })
 }
 
-export function usedProxyRows(rows: MetricRow[], proxyText: string): UsedProxyRow[] {
+export function usedProxyRows(
+  rows: MetricRow[],
+  proxyText: string,
+): UsedProxyRow[] {
   const local = new Set(normalizeList(proxyText).map(proxyKey))
   const seen = new Set<string>()
   const result: UsedProxyRow[] = []
@@ -140,12 +157,24 @@ export function cacheStatus(row: MetricRow) {
 
 export function statusTone(row: MetricRow) {
   const status = cacheStatus(row)
-  return row.error ? 'fail' : status === 'HIT' ? 'hit' : isMissLike(status) ? 'miss' : 'other'
+  return row.error
+    ? 'fail'
+    : status === 'HIT'
+      ? 'hit'
+      : isMissLike(status)
+        ? 'miss'
+        : 'other'
 }
 
 export function statusToneFromValue(status: string, error = '') {
   const value = (status || (error ? 'FAIL' : '-')).toUpperCase()
-  return error ? 'fail' : value === 'HIT' ? 'hit' : isMissLike(value) ? 'miss' : 'other'
+  return error
+    ? 'fail'
+    : value === 'HIT'
+      ? 'hit'
+      : isMissLike(value)
+        ? 'miss'
+        : 'other'
 }
 
 export function metricSearchText(row: MetricRow, status = cacheStatus(row)) {
@@ -218,7 +247,9 @@ export function compact(value: number) {
 
 export function avg(values: number[]) {
   if (!values.length) return 0
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+  return Math.round(
+    values.reduce((sum, value) => sum + value, 0) / values.length,
+  )
 }
 
 export function percent(value: number, total: number) {
@@ -260,22 +291,40 @@ export function relativeTime(value: string) {
 }
 
 export function isMissLike(status: string) {
-  return ['MISS', 'BYPASS', 'DYNAMIC', 'EXPIRED', 'REVALIDATED', 'STALE', 'UPDATING'].includes(
-    status,
-  )
+  return [
+    'MISS',
+    'BYPASS',
+    'DYNAMIC',
+    'EXPIRED',
+    'REVALIDATED',
+    'STALE',
+    'UPDATING',
+  ].includes(status)
 }
 
-export function isMetricRangeDays(value: number): value is MetricRangeDays {
+export function isMetricRangeDays(value: unknown): value is MetricRangeDays {
   return metricRangeDayOptions.includes(value as MetricRangeDays)
 }
 
+export function parseMetricRangeDays(value: string): MetricRangeDays {
+  const range = value === 'all' ? value : Number(value)
+  return isMetricRangeDays(range) ? range : 'all'
+}
+
 export function metricRangeLabel(days: MetricRangeDays) {
+  if (days === 'all') return 'All time'
   return days === 1 ? '1 day' : `${days} days`
 }
 
-export function ageRangeLabel(days: MetricRangeDays, availableFrom?: string, availableTo?: string) {
+export function ageRangeLabel(
+  days: MetricRangeDays,
+  availableFrom?: string,
+  availableTo?: string,
+) {
   if (!availableTo) return `${metricRangeLabel(days)} - No data`
-  const available = availableFrom ? `${shortDate(availableFrom)} to ${shortDate(availableTo)}` : shortDate(availableTo)
+  const available = availableFrom
+    ? `${shortDate(availableFrom)} to ${shortDate(availableTo)}`
+    : shortDate(availableTo)
   return `${metricRangeLabel(days)} - ${available}`
 }
 
@@ -284,7 +333,10 @@ export function metricRoundBase(value: string | number) {
 }
 
 export function metricTimeColumns(rows: MetricRow[]) {
-  const columns = new Map<string, MetricTimeColumn & { start: number; end: number }>()
+  const columns = new Map<
+    string,
+    MetricTimeColumn & { start: number; end: number }
+  >()
 
   for (const row of rows) {
     const column = metricBatchColumn(row)
@@ -308,7 +360,10 @@ export function metricTimeColumns(rows: MetricRow[]) {
     .map(({ start: _start, end: _end, ...column }) => column)
 }
 
-export function metricTimeGroups(rows: MetricRow[], columns: MetricTimeColumn[]) {
+export function metricTimeGroups(
+  rows: MetricRow[],
+  columns: MetricTimeColumn[],
+) {
   const validColumns = new Set(columns.map((column) => column.key))
   const groups = new Map<string, MetricTimeGroup>()
 
@@ -355,7 +410,12 @@ export function metricBatchColumn(row: MetricRow): MetricTimeColumn {
 export function metricTimeColumn(value: string): MetricTimeColumn {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
-    return { key: 'unknown', label: '-', meta: 'No time', sort: Number.MAX_SAFE_INTEGER }
+    return {
+      key: 'unknown',
+      label: '-',
+      meta: 'No time',
+      sort: Number.MAX_SAFE_INTEGER,
+    }
   }
 
   const key = [
@@ -386,7 +446,11 @@ export function batchTimeRange(start: number, end: number) {
 }
 
 export function metricMatrixMinWidth(columns: MetricTimeColumn[]) {
-  return matrixUrlColWidth + matrixCountryColWidth + columns.length * matrixTimeColWidth
+  return (
+    matrixUrlColWidth +
+    matrixCountryColWidth +
+    columns.length * matrixTimeColWidth
+  )
 }
 
 export function statusMeta(row: MetricRow) {
@@ -431,7 +495,9 @@ export function cacheAgeBuckets(rows: MetricRow[]) {
   for (const row of rows) {
     const time = Date.parse(row.timestamp_utc || '')
     const round = metricRoundBase(row.round_id || row.round || '')
-    const fallbackKey = Number.isNaN(time) ? 'unknown' : new Date(time).toISOString().slice(0, 13)
+    const fallbackKey = Number.isNaN(time)
+      ? 'unknown'
+      : new Date(time).toISOString().slice(0, 13)
     const key = round ? `round-${round}` : fallbackKey
     let bucket = buckets.get(key)
 
@@ -447,7 +513,10 @@ export function cacheAgeBuckets(rows: MetricRow[]) {
         label: round
           ? `R${round}`
           : date
-            ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+            ? date.toLocaleTimeString([], {
+                hour: 'numeric',
+                minute: '2-digit',
+              })
             : '-',
         maxAge: 0,
         meta: date ? shortDate(date.toISOString()) : 'No time',
@@ -486,7 +555,9 @@ export function cacheAgeBuckets(rows: MetricRow[]) {
 function finalizeAgeBucket(bucket: CacheAgeBucket) {
   bucket.maxAge = Math.max(0, ...bucket.ageValues)
   bucket.avgAge = avg(bucket.ageValues)
-  bucket.hitRate = bucket.useful ? Math.round((bucket.hits / bucket.useful) * 100) : 0
+  bucket.hitRate = bucket.useful
+    ? Math.round((bucket.hits / bucket.useful) * 100)
+    : 0
   return bucket
 }
 
@@ -535,7 +606,10 @@ export function topHitUrls(rows: MetricRow[]) {
       item.hits += 1
       if (age > 0) item.ageValues.push(age)
     }
-    if (!item.latestTimestamp || Date.parse(row.timestamp_utc || '') > Date.parse(item.latestTimestamp)) {
+    if (
+      !item.latestTimestamp ||
+      Date.parse(row.timestamp_utc || '') > Date.parse(item.latestTimestamp)
+    ) {
       item.latestTimestamp = row.timestamp_utc || ''
     }
   }
@@ -548,7 +622,9 @@ export function topHitUrls(rows: MetricRow[]) {
       maxAge: Math.max(0, ...ageValues),
     }))
     .filter((item) => item.hits > 0)
-    .sort((a, b) => b.hits - a.hits || b.hitRate - a.hitRate || b.maxAge - a.maxAge)
+    .sort(
+      (a, b) => b.hits - a.hits || b.hitRate - a.hitRate || b.maxAge - a.maxAge,
+    )
     .slice(0, 10)
 }
 
