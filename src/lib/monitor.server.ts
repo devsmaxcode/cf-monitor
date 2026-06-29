@@ -14,6 +14,14 @@ import {
   readMetricRounds,
   writeAppSetting,
 } from './metrics-db'
+import {
+  appDateLabel,
+  appDateTimeLabel,
+  appTimeKey,
+  appTimeLabel,
+  appTimeParts,
+  appTimeSort,
+} from './timezone'
 import type {
   MetricColumnSummary,
   MetricDateRange,
@@ -423,7 +431,7 @@ export async function stopMonitor() {
       pushLog(`round stop cleanup failed: ${errorMessage(error)}`),
     )
   }
-  pushLog(`[${new Date().toLocaleString()}] monitor stopped`)
+  pushLog(`[${appDateTimeLabel(new Date())}] monitor stopped`)
   await persistMonitorState()
   return snapshotState()
 }
@@ -644,7 +652,7 @@ async function runMonitorRound(reason: string) {
 
     if (isStopRequested()) {
       pushLog(
-        `[${new Date().toLocaleString()}] round ${roundId} stopped before collector start`,
+        `[${appDateTimeLabel(new Date())}] round ${roundId} stopped before collector start`,
       )
       await finalizeMetricRound(
         config.output,
@@ -659,7 +667,7 @@ async function runMonitorRound(reason: string) {
     const started = new Date()
     state.lastRunAt = started.toISOString()
     pushLog(
-      `[${started.toLocaleString()}] round ${roundId} started (${reason})`,
+      `[${appDateTimeLabel(started)}] round ${roundId} started (${reason})`,
     )
     pushLog(
       `collector args: ${args
@@ -686,7 +694,7 @@ async function runMonitorRound(reason: string) {
 
     if (exitCode !== 0) {
       if (isStopRequested()) {
-        pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped`)
+        pushLog(`[${appDateTimeLabel(new Date())}] round ${roundId} stopped`)
         await finalizeMetricRound(
           config.output,
           roundId,
@@ -710,7 +718,7 @@ async function runMonitorRound(reason: string) {
         { status: 'completed' },
         root,
       )
-      pushLog(`[${new Date().toLocaleString()}] round ${roundId} finished`)
+      pushLog(`[${appDateTimeLabel(new Date())}] round ${roundId} finished`)
     }
   } catch (error) {
     state.lastExitCode = 1
@@ -839,7 +847,7 @@ async function scheduleNext(config: Config) {
   const delay = config.roundIntervalSeconds
   const next = new Date(Date.now() + delay * 1000)
   state.nextRunAt = next.toISOString()
-  pushLog(`[${new Date().toLocaleString()}] next run in ${delay}s`)
+  pushLog(`[${appDateTimeLabel(new Date())}] next run in ${delay}s`)
 
   scheduledJob = setTimeout(
     () => {
@@ -1049,24 +1057,13 @@ function metricTimeColumn(value: string): MetricTimeColumn {
     }
   }
 
-  const key = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-    String(date.getHours()).padStart(2, '0'),
-    String(date.getMinutes()).padStart(2, '0'),
-  ].join('-')
+  const parts = appTimeParts(date)
 
   return {
-    key,
-    label: date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-    meta: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
-    sort:
-      date.getFullYear() * 100000000 +
-      (date.getMonth() + 1) * 1000000 +
-      date.getDate() * 10000 +
-      date.getHours() * 100 +
-      date.getMinutes(),
+    key: appTimeKey(parts),
+    label: appTimeLabel(date),
+    meta: appDateLabel(date),
+    sort: appTimeSort(parts),
   }
 }
 
@@ -1088,11 +1085,7 @@ function metricBatchColumn(row: MetricRow): MetricTimeColumn {
 function batchTimeRange(start: number, end: number) {
   if (start === Number.MAX_SAFE_INTEGER) return 'No time'
   const middleDate = new Date(start + (end - start) / 2)
-  const middleLabel = middleDate.toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-  return `${middleLabel}, ${middleDate.toLocaleDateString([], { month: 'short', day: 'numeric' })}`
+  return `${appTimeLabel(middleDate)}, ${appDateLabel(middleDate)}`
 }
 
 function isMissLike(row: MetricRow) {

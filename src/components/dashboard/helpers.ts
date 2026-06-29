@@ -1,6 +1,12 @@
 import { metricRangeDayOptions } from '#/lib/metric-range'
 import type { MetricRangeDays } from '#/lib/metric-range'
 import type { Config } from '#/lib/monitor.server'
+import {
+  appDateLabel,
+  appTimeKey,
+  appTimeParts,
+  appTimeSort,
+} from '#/lib/timezone'
 import type { MetricFilters, MetricRow, UsedProxyRow } from './types'
 
 export const rangeOptions = metricRangeDayOptions
@@ -8,20 +14,6 @@ export const dayMs = 24 * 60 * 60 * 1000
 export const matrixUrlColWidth = 260
 export const matrixCountryColWidth = 150
 export const matrixTimeColWidth = 122
-const monthLabels = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-] as const
 
 export type MetricTimeColumn = {
   key: string
@@ -418,24 +410,13 @@ export function metricTimeColumn(value: string): MetricTimeColumn {
     }
   }
 
-  const key = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-    String(date.getHours()).padStart(2, '0'),
-    String(date.getMinutes()).padStart(2, '0'),
-  ].join('-')
+  const parts = appTimeParts(date)
 
   return {
-    key,
+    key: appTimeKey(parts),
     label: timeLabel(date),
     meta: dateLabel(date),
-    sort:
-      date.getFullYear() * 100000000 +
-      (date.getMonth() + 1) * 1000000 +
-      date.getDate() * 10000 +
-      date.getHours() * 100 +
-      date.getMinutes(),
+    sort: appTimeSort(parts),
   }
 }
 
@@ -510,14 +491,7 @@ export function cacheAgeBuckets(rows: MetricRow[]) {
         hitRate: 0,
         hits: 0,
         key,
-        label: round
-          ? `R${round}`
-          : date
-            ? date.toLocaleTimeString([], {
-                hour: 'numeric',
-                minute: '2-digit',
-              })
-            : '-',
+        label: round ? `R${round}` : date ? timeLabel(date) : '-',
         maxAge: 0,
         meta: date ? shortDate(date.toISOString()) : 'No time',
         missLike: 0,
@@ -644,11 +618,12 @@ export function ageBucketTitle(bucket: CacheAgeBucket) {
 }
 
 function timeLabel(date: Date) {
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const parts = appTimeParts(date)
+  return `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
 }
 
 function dateLabel(date: Date) {
-  return `${date.getDate()} ${monthLabels[date.getMonth()] ?? ''}`.trim()
+  return appDateLabel(date)
 }
 
 export function roundStatusLabel(status: string) {
