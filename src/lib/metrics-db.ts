@@ -477,8 +477,8 @@ export async function softDeleteMetricData(
     ])
 
     return {
-      deletedMetrics: integer(metricCount?.count),
-      deletedRounds: integer(roundCount?.count),
+      deletedMetrics: integer(metricCount.count),
+      deletedRounds: integer(roundCount.count),
       ok: true,
     }
   })

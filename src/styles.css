@@ -1759,6 +1759,35 @@ h3 {
   display: grid;
   gap: 16px;
   padding: 18px;
+  position: relative;
+}
+
+.cache-age-dashboard[aria-busy='true'] {
+  opacity: 0.68;
+}
+
+.age-filter-loading {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 12px 28px rgb(16 24 23 / 10%);
+  color: #20302c;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 9px;
+  min-height: 38px;
+  padding: 6px 12px 6px 7px;
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  z-index: 5;
+}
+
+.age-filter-loading .crawl-spinner {
+  height: 22px;
+  width: 22px;
 }
 
 .age-summary-grid {

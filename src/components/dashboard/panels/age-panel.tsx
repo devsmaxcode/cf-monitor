@@ -1,5 +1,5 @@
 import { Clock3, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import type { MetricRangeDays } from '#/lib/monitor.server'
 import {
   ageBucketTitle,
@@ -29,17 +29,23 @@ export function AgePanel({
 }) {
   const [linkFilter, setLinkFilter] = useState('')
   const [linkMenuOpen, setLinkMenuOpen] = useState(false)
-  const linkOptions = useMemo(() => metricLinkOptions(rows), [rows])
+  const deferredLinkFilter = useDeferredValue(linkFilter)
+  const isFiltering = linkFilter !== deferredLinkFilter
+  const linkIndex = useMemo(() => metricLinkIndex(rows), [rows])
+  const linkOptions = useMemo(() => metricLinkOptions(linkIndex), [linkIndex])
   const visibleLinkOptions = useMemo(
     () => filterLinkOptions(linkOptions, linkFilter).slice(0, 25),
     [linkFilter, linkOptions],
   )
   const filteredRows = useMemo(
-    () => filterRowsByLink(rows, linkFilter),
-    [linkFilter, rows],
+    () =>
+      deferredLinkFilter.trim()
+        ? filterRowsByLink(linkIndex, deferredLinkFilter)
+        : rows,
+    [deferredLinkFilter, linkIndex, rows],
   )
   const buckets = useMemo(() => cacheAgeBuckets(filteredRows), [filteredRows])
-  const sampleLabel = linkFilter.trim()
+  const sampleLabel = deferredLinkFilter.trim()
     ? `${filteredRows.length} of ${rows.length} samples`
     : `${rows.length} samples`
 
@@ -95,19 +101,19 @@ export function AgePanel({
             ) : null}
             {linkMenuOpen && visibleLinkOptions.length ? (
               <div className="age-link-menu">
-                {visibleLinkOptions.map((url) => (
+                {visibleLinkOptions.map((option) => (
                   <button
-                    key={url}
+                    key={option.value}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
-                      setLinkFilter(url)
+                      setLinkFilter(option.value)
                       setLinkMenuOpen(false)
                     }}
-                    title={url}
+                    title={option.value}
                     type="button"
                   >
-                    <strong>{url}</strong>
-                    <span>{compactUrl(url)}</span>
+                    <strong>{option.value}</strong>
+                    <span>{option.compact}</span>
                   </button>
                 ))}
               </div>
@@ -115,7 +121,13 @@ export function AgePanel({
           </div>
         </label>
       </div>
-      <div className="cache-age-dashboard">
+      <div className="cache-age-dashboard" aria-busy={isFiltering}>
+        {isFiltering ? (
+          <div className="age-filter-loading" role="status">
+            <span aria-hidden="true" className="crawl-spinner" />
+            Filtering links...
+          </div>
+        ) : null}
         {filteredRows.length && buckets.length ? (
           <AgeDashboard buckets={buckets} rows={filteredRows} />
         ) : (
@@ -130,32 +142,83 @@ export function AgePanel({
   )
 }
 
-function metricLinkOptions(rows: MetricRow[]) {
-  return unique(rows.map((row) => row.url || row.page || '').filter(Boolean))
+type LinkIndex = {
+  exactRows: Map<string, MetricRow[]>
+  rows: LinkIndexRow[]
 }
 
-function filterLinkOptions(options: string[], value: string) {
-  const query = value.trim().toLowerCase()
-  if (!query) return options
+type LinkIndexRow = {
+  row: MetricRow
+  search: string
+  value: string
+}
 
-  return options.filter(
-    (url) =>
-      url.toLowerCase().includes(query) ||
-      compactUrl(url).toLowerCase().includes(query),
+type LinkOption = {
+  compact: string
+  search: string
+  value: string
+}
+
+function metricLinkIndex(rows: MetricRow[]): LinkIndex {
+  const exactRows = new Map<string, MetricRow[]>()
+  const indexedRows = rows.map((row) => {
+    const value = row.url || row.page || ''
+    const compactLabel = compactUrl(value)
+    addExactLinkRow(exactRows, value, row)
+    if (compactLabel !== value) addExactLinkRow(exactRows, compactLabel, row)
+
+    return {
+      row,
+      search: `${value} ${compactLabel}`.toLowerCase(),
+      value,
+    }
+  })
+
+  return { exactRows, rows: indexedRows }
+}
+
+function addExactLinkRow(
+  exactRows: Map<string, MetricRow[]>,
+  value: string,
+  row: MetricRow,
+) {
+  const key = value.trim().toLowerCase()
+  if (!key) return
+
+  const rows = exactRows.get(key)
+  if (rows) rows.push(row)
+  else exactRows.set(key, [row])
+}
+
+function metricLinkOptions(index: LinkIndex): LinkOption[] {
+  return unique(index.rows.map((item) => item.value).filter(Boolean)).map(
+    (value) => {
+      const compactLabel = compactUrl(value)
+      return {
+        compact: compactLabel,
+        search: `${value} ${compactLabel}`.toLowerCase(),
+        value,
+      }
+    },
   )
 }
 
-function filterRowsByLink(rows: MetricRow[], value: string) {
+function filterLinkOptions(options: LinkOption[], value: string) {
   const query = value.trim().toLowerCase()
-  if (!query) return rows
+  if (!query) return options
 
-  return rows.filter((row) => {
-    const url = row.url || row.page || ''
-    return (
-      url.toLowerCase().includes(query) ||
-      compactUrl(url).toLowerCase().includes(query)
-    )
-  })
+  return options.filter((option) => option.search.includes(query))
+}
+
+function filterRowsByLink(index: LinkIndex, value: string) {
+  const query = value.trim().toLowerCase()
+  if (!query) return []
+  const exactRows = index.exactRows.get(query)
+  if (exactRows) return exactRows
+
+  return index.rows
+    .filter((item) => item.search.includes(query))
+    .map((item) => item.row)
 }
 
 function AgeDashboard({
