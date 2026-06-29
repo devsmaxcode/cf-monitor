@@ -204,8 +204,8 @@ jobs:
           export NODE_ENV=production
           export PORT="$APP_PORT"
           export PM2_APP_NAME
-          pm2 startOrReload ecosystem.config.cjs --update-env
-          pm2 save
+          pm2 delete "$PM2_APP_NAME" >/dev/null 2>&1 || true
+          pm2 start ecosystem.config.cjs --update-env
 
           pm2 describe "$PM2_APP_NAME" >/dev/null
 
@@ -233,6 +233,7 @@ jobs:
             exit 1
           fi
 
+          pm2 save
           echo "App health check passed: $HEALTH_URL"
           EOF
 
