@@ -7,10 +7,12 @@ import {
   DEFAULT_METRICS_DB,
   finalizeMetricRound,
   normalizeMetricsOutput,
+  readAppSetting,
   resolveMetricsDbPath,
   readMetricRowsPage,
   readMetricRows,
   readMetricRounds,
+  writeAppSetting,
 } from './metrics-db'
 import type {
   MetricColumnSummary,
@@ -92,6 +94,9 @@ const configPath = join(storageDir, 'dashboard-config.json')
 const runtimePath = join(storageDir, 'monitor-runtime.json')
 const pagesPath = join(storageDir, 'pages.txt')
 const proxiesPath = join(storageDir, 'proxies.txt')
+const dashboardConfigSetting = 'dashboard-config'
+const proxyListSetting = 'proxy-list'
+const appSettingsDbOutput = DEFAULT_METRICS_DB
 const legacyDefaultBaseUrl = 'https://ummah.one'
 const activeRoundMaxAgeMs = 24 * 60 * 60 * 1000
 
@@ -219,15 +224,56 @@ function normalizeStoredMonitorState(value: unknown): StoredMonitorState {
 }
 
 export async function readConfig(): Promise<Config> {
-  if (!(await exists(configPath))) {
-    await saveConfig(defaultConfig)
-    return defaultConfig
+  const stored = await readAppSetting(
+    dashboardConfigSetting,
+    appSettingsDbOutput,
+    root,
+  )
+  if (stored !== null) {
+    try {
+      return sanitizeStoredConfig(stored)
+    } catch (error) {
+      pushLog(`stored config read failed: ${errorMessage(error)}`)
+    }
   }
 
-  const stored = JSON.parse(
-    await readFile(configPath, 'utf8'),
-  ) as Partial<Config>
-  return sanitizeConfig({ ...defaultConfig, ...stored })
+  const legacy = await readLegacyConfig()
+  if (legacy) {
+    await writeStoredConfig(legacy)
+    return legacy
+  }
+
+  await writeStoredConfig(defaultConfig)
+  return defaultConfig
+}
+
+async function readLegacyConfig() {
+  if (!(await exists(configPath))) return null
+
+  try {
+    return sanitizeStoredConfig(await readFile(configPath, 'utf8'))
+  } catch (error) {
+    pushLog(`legacy config read failed: ${errorMessage(error)}`)
+    return null
+  }
+}
+
+function sanitizeStoredConfig(stored: string) {
+  return sanitizeConfig({
+    ...defaultConfig,
+    ...(JSON.parse(stored) as Partial<Config>),
+  })
+}
+
+async function writeStoredConfig(config: Config) {
+  const sanitized = sanitizeConfig(config)
+  await writeAppSetting(
+    dashboardConfigSetting,
+    `${JSON.stringify(sanitized, null, 2)}\n`,
+    appSettingsDbOutput,
+    root,
+  )
+  return sanitized
 }
 
 export function sanitizeConfig(
@@ -276,9 +322,8 @@ export function sanitizeConfig(
 }
 
 export async function saveConfig(config: Config) {
-  await mkdir(storageDir, { recursive: true })
   const sanitized = sanitizeConfig(config)
-  await writeFile(configPath, `${JSON.stringify(sanitized, null, 2)}\n`, 'utf8')
+  await writeStoredConfig(sanitized)
   const stored = await readStoredMonitorState()
   if ((state.running || stored?.running) && !state.busy) {
     state.running = true
@@ -299,6 +344,7 @@ export async function readProxies() {
 
 export async function saveProxies(text: string) {
   await mkdir(storageDir, { recursive: true })
+  await writeAppSetting(proxyListSetting, text, appSettingsDbOutput, root)
   await writeFile(proxiesPath, text, 'utf8')
   return { ok: true }
 }
@@ -415,15 +461,24 @@ function clamp(value: number, min: number, max: number, fallback: number) {
 async function ensureRunFiles(config: Config) {
   await mkdir(storageDir, { recursive: true })
   await writeFile(pagesPath, `${config.pages.join('\n')}\n`, 'utf8')
-  if (!(await exists(proxiesPath))) await writeFile(proxiesPath, '', 'utf8')
+  await writeFile(proxiesPath, await readProxyText(), 'utf8')
   await mkdir(dirname(resolveMetricsDbPath(config.output, root)), {
     recursive: true,
   })
 }
 
 async function readProxyText() {
+  const stored = await readAppSetting(
+    proxyListSetting,
+    appSettingsDbOutput,
+    root,
+  )
+  if (stored !== null) return stored
+
   if (!(await exists(proxiesPath))) return ''
-  return readFile(proxiesPath, 'utf8')
+  const legacy = await readFile(proxiesPath, 'utf8')
+  await writeAppSetting(proxyListSetting, legacy, appSettingsDbOutput, root)
+  return legacy
 }
 
 function pushLog(line: string) {

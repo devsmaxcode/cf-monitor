@@ -111,6 +111,8 @@ export type MetricRowsPage = {
   totalRows: number
 }
 
+export type AppSettingKey = 'dashboard-config' | 'proxy-list'
+
 type DbHandle = {
   db: SqlJsDatabase
   filename: string
@@ -450,6 +452,41 @@ export async function applyMetricRoundRetention(
   )
 }
 
+export async function readAppSetting(
+  key: AppSettingKey,
+  output = DEFAULT_METRICS_DB,
+  baseDir = process.cwd(),
+) {
+  return withMetricsDb(output, baseDir, false, ({ db }) => {
+    const row = selectRows(
+      db,
+      'SELECT value FROM app_settings WHERE key = ? LIMIT 1',
+      [key],
+    ).at(0)
+    return row ? value(row.value) : null
+  })
+}
+
+export async function writeAppSetting(
+  key: AppSettingKey,
+  settingValue: string,
+  output = DEFAULT_METRICS_DB,
+  baseDir = process.cwd(),
+) {
+  await withMetricsDb(output, baseDir, true, ({ db }) => {
+    db.run(
+      `
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `,
+      [key, settingValue],
+    )
+  })
+}
+
 export async function readMetricRounds(
   output: string,
   baseDir = process.cwd(),
@@ -534,6 +571,13 @@ async function exists(path: string) {
 }
 
 function ensureMetricsSchema(db: SqlJsDatabase) {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
   db.run(`
     CREATE TABLE IF NOT EXISTS cache_rounds (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

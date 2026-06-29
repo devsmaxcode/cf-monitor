@@ -12,5 +12,7 @@ dist-ssr
 __unconfig*
 todos.json
 storage/monitor-runtime.json
+storage/dashboard-config.json
+storage/*.txt
 storage/*.sqlite
 storage/*.sqlite3

@@ -59,7 +59,7 @@ bun run start
 
 Set `PORT`/`HOST` or `APP_PORT`/`APP_HOST` for the bind address. The GitHub workflow uploads the built `dist/` artifact, syncs it to the VPS, and restarts PM2 with `ecosystem.config.cjs`.
 
-Runtime data lives in `STORAGE_DIR` (or `DATA_DIR`), falling back to `APP_ROOT/storage`. Keep that directory outside any deleted release folder, or keep the deploy workflow's protected `storage/` directory in place, so `storage/cloudflare-cache-metrics.sqlite`, config, proxies, and runtime state persist across deployments.
+Runtime data lives in `STORAGE_DIR` (or `DATA_DIR`), falling back to `APP_ROOT/storage`. Keep that directory outside any deleted release folder, or keep the deploy workflow's protected `storage/` directory in place, so `storage/cloudflare-cache-metrics.sqlite` and runtime state persist across deployments. Dashboard config and the proxy list are saved inside the SQLite DB; `pages.txt` and `proxies.txt` are regenerated collector inputs.
 
 ## Shadcn
 
