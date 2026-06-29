@@ -368,7 +368,15 @@ export async function stopMonitor() {
   state.running = false
   state.nextRunAt = null
   clearScheduledJob()
+  const hadActiveProcess = Boolean(activeMonitorProcess)
   stopActiveMonitor()
+  if (!hadActiveProcess) {
+    state.busy = false
+    state.crawl = null
+    await stopStoredRunningRounds().catch((error) =>
+      pushLog(`round stop cleanup failed: ${errorMessage(error)}`),
+    )
+  }
   pushLog(`[${new Date().toLocaleString()}] monitor stopped`)
   await persistMonitorState()
   return snapshotState()
@@ -432,18 +440,18 @@ async function snapshotState(
   const activeRoundArmed = activeRound
     ? roundKeepsMonitorArmed(activeRound)
     : false
-  const storedRunning = Boolean(stored?.running || activeRoundArmed)
+  const recoverFromActiveRound = Boolean(
+    activeRoundArmed && stored?.running !== false,
+  )
+  const storedRunning = Boolean(stored?.running || recoverFromActiveRound)
   const running = state.running || storedRunning
-  const busy = state.busy || Boolean(activeRound)
+  const busy = state.busy
 
   if (storedRunning && !state.running) {
     state.running = true
-    state.startedAt =
-      state.startedAt || stored?.startedAt || activeRound?.started_at || null
-    state.lastRunAt =
-      state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null
-    state.lastReason =
-      state.lastReason || activeRound?.reason || stored?.lastReason || null
+    state.startedAt = state.startedAt || stored?.startedAt || null
+    state.lastRunAt = state.lastRunAt || stored?.lastRunAt || null
+    state.lastReason = state.lastReason || stored?.lastReason || null
     state.nextRunAt = state.nextRunAt || stored?.nextRunAt || null
     if (activeRoundArmed && !stored?.running) persistMonitorStateSoon()
   }
@@ -456,20 +464,16 @@ async function snapshotState(
     ...state,
     running,
     busy,
-    round: state.round || activeRound?.id || 0,
+    round: state.round || (busy ? activeRound?.id || 0 : 0),
     crawl: state.busy && state.crawl ? { ...state.crawl } : null,
-    startedAt:
-      state.startedAt || activeRound?.started_at || stored?.startedAt || null,
-    lastRunAt:
-      state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null,
+    startedAt: state.startedAt || stored?.startedAt || null,
+    lastRunAt: state.lastRunAt || stored?.lastRunAt || null,
     nextRunAt: busy
       ? null
       : state.nextRunAt || (running ? stored?.nextRunAt || null : null),
     lastExitCode: state.lastExitCode ?? stored?.lastExitCode ?? null,
-    lastReason:
-      state.lastReason || activeRound?.reason || stored?.lastReason || null,
-    lastError:
-      state.lastError || activeRound?.error || stored?.lastError || null,
+    lastReason: state.lastReason || stored?.lastReason || null,
+    lastError: state.lastError || stored?.lastError || null,
     logs: [...state.logs],
   }
 }
@@ -748,6 +752,23 @@ function stopActiveMonitor() {
   } catch (error) {
     pushLog(`failed to stop collector: ${errorMessage(error)}`)
   }
+}
+
+async function stopStoredRunningRounds() {
+  const config = await readConfig()
+  const rounds = await readMetricRounds(config.output, root)
+  await Promise.all(
+    rounds
+      .filter((round) => round.status === 'running')
+      .map((round) =>
+        finalizeMetricRound(
+          config.output,
+          round.id,
+          { status: 'stopped', error: 'stopped by user' },
+          root,
+        ),
+      ),
+  )
 }
 
 function clearScheduledJob() {
