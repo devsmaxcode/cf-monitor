@@ -193,10 +193,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
       {mounted && (!props.loading || pageGroups.length) ? (
         <>
           {pageGroups.length ? (
-            <div
-              className="table-scroll metric-table-scroll"
-              style={tableStyle}
-            >
+            <div style={tableStyle}>
               <table className="sample-table metric-matrix">
                 <colgroup>
                   {table.getAllLeafColumns().map((column) => (
