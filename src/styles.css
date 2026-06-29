@@ -725,11 +725,15 @@ h3 {
 }
 
 .button,
-.icon-button,
-.tabs a {
+.icon-button {
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   min-height: 38px;
+}
+
+.tabs a {
+  border: 1px solid transparent;
+  border-radius: 8px;
 }
 
 .button {
@@ -741,8 +745,7 @@ h3 {
 }
 
 .button:hover,
-.icon-button:hover,
-.tabs a:hover {
+.icon-button:hover {
   border-color: #b9c7c2;
 }
 
@@ -989,8 +992,13 @@ h3 {
   display: flex;
   flex: 0 0 auto;
   flex-wrap: wrap;
+  font-size: 13px;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.section-head-actions > span {
+  font-size: inherit;
 }
 
 .tabs {
@@ -1005,6 +1013,7 @@ h3 {
 
 .tabs .active {
   background: var(--panel);
+  border-color: var(--line-strong);
   box-shadow: 0 1px 2px rgb(16 24 23 / 6%);
   color: var(--text);
 }
