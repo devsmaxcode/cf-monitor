@@ -1,4 +1,5 @@
-import { Clock3 } from 'lucide-react'
+import { Clock3, X } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import type { MetricRangeDays } from '#/lib/monitor.server'
 import {
   ageBucketTitle,
@@ -12,6 +13,7 @@ import {
   parseMetricRangeDays,
   rangeOptions,
   topHitUrls,
+  unique,
 } from '../helpers'
 import type { CacheAgeBucket } from '../helpers'
 import type { MetricRow } from '../types'
@@ -25,7 +27,21 @@ export function AgePanel({
   rows: MetricRow[]
   setRangeDays: (value: MetricRangeDays) => void
 }) {
-  const buckets = cacheAgeBuckets(rows)
+  const [linkFilter, setLinkFilter] = useState('')
+  const [linkMenuOpen, setLinkMenuOpen] = useState(false)
+  const linkOptions = useMemo(() => metricLinkOptions(rows), [rows])
+  const visibleLinkOptions = useMemo(
+    () => filterLinkOptions(linkOptions, linkFilter).slice(0, 25),
+    [linkFilter, linkOptions],
+  )
+  const filteredRows = useMemo(
+    () => filterRowsByLink(rows, linkFilter),
+    [linkFilter, rows],
+  )
+  const buckets = useMemo(() => cacheAgeBuckets(filteredRows), [filteredRows])
+  const sampleLabel = linkFilter.trim()
+    ? `${filteredRows.length} of ${rows.length} samples`
+    : `${rows.length} samples`
 
   return (
     <section className="side-panel cache-age-panel">
@@ -36,7 +52,7 @@ export function AgePanel({
           </span>
           Cache Age
         </h2>
-        <span>{rows.length} samples</span>
+        <span>{sampleLabel}</span>
       </div>
       <div className="table-filters age-filters">
         <label className="metric-range-control">
@@ -55,16 +71,91 @@ export function AgePanel({
             ))}
           </select>
         </label>
+        <label className="age-link-filter">
+          <span>Link filter</span>
+          <div className="age-link-input">
+            <input
+              onChange={(event) => setLinkFilter(event.target.value)}
+              onBlur={() =>
+                window.setTimeout(() => setLinkMenuOpen(false), 100)
+              }
+              onFocus={() => setLinkMenuOpen(true)}
+              placeholder="Search or choose a URL..."
+              value={linkFilter}
+            />
+            {linkFilter ? (
+              <button
+                aria-label="Clear link filter"
+                onClick={() => setLinkFilter('')}
+                title="Clear link filter"
+                type="button"
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+            {linkMenuOpen && visibleLinkOptions.length ? (
+              <div className="age-link-menu">
+                {visibleLinkOptions.map((url) => (
+                  <button
+                    key={url}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      setLinkFilter(url)
+                      setLinkMenuOpen(false)
+                    }}
+                    title={url}
+                    type="button"
+                  >
+                    <strong>{url}</strong>
+                    <span>{compactUrl(url)}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </label>
       </div>
       <div className="cache-age-dashboard">
-        {rows.length && buckets.length ? (
-          <AgeDashboard buckets={buckets} rows={rows} />
+        {filteredRows.length && buckets.length ? (
+          <AgeDashboard buckets={buckets} rows={filteredRows} />
         ) : (
-          <div className="empty-state">No cache age data yet.</div>
+          <div className="empty-state">
+            {rows.length
+              ? 'No cache age data matches this link filter.'
+              : 'No cache age data yet.'}
+          </div>
         )}
       </div>
     </section>
   )
+}
+
+function metricLinkOptions(rows: MetricRow[]) {
+  return unique(rows.map((row) => row.url || row.page || '').filter(Boolean))
+}
+
+function filterLinkOptions(options: string[], value: string) {
+  const query = value.trim().toLowerCase()
+  if (!query) return options
+
+  return options.filter(
+    (url) =>
+      url.toLowerCase().includes(query) ||
+      compactUrl(url).toLowerCase().includes(query),
+  )
+}
+
+function filterRowsByLink(rows: MetricRow[], value: string) {
+  const query = value.trim().toLowerCase()
+  if (!query) return rows
+
+  return rows.filter((row) => {
+    const url = row.url || row.page || ''
+    return (
+      url.toLowerCase().includes(query) ||
+      compactUrl(url).toLowerCase().includes(query)
+    )
+  })
 }
 
 function AgeDashboard({
