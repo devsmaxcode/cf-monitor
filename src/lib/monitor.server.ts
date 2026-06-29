@@ -12,6 +12,7 @@ import {
   readMetricRowsPage,
   readMetricRows,
   readMetricRounds,
+  softDeleteMetricData,
   writeAppSetting,
 } from './metrics-db'
 import {
@@ -407,6 +408,11 @@ export async function getMetricRowsPage(input: {
       availableTo: payload.availableTo,
     },
   }
+}
+
+export async function deleteMetricData() {
+  const config = await readConfig()
+  return softDeleteMetricData(config.output, root)
 }
 
 export async function startMonitor() {
@@ -949,10 +955,7 @@ async function buildMetrics(
 
   const summary = {
     totalRounds: rounds.length,
-    totalRows: Math.max(
-      rows.length,
-      rounds.reduce((sum, round) => sum + round.total_rows, 0),
-    ),
+    totalRows: rows.length,
     latestCells: latestRows.length,
     latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT')
       .length,

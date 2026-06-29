@@ -984,6 +984,15 @@ h3 {
   font-size: 14px;
 }
 
+.section-head-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .tabs {
   background: #f1f4f3;
   border-color: #e7ecea;
@@ -1168,6 +1177,20 @@ h3 {
 
 .matrix-range-label {
   flex: 0 0 auto;
+}
+
+.matrix-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.compact-button {
+  min-height: 34px;
+  padding: 0 12px;
 }
 
 .table-scroll {
@@ -2729,10 +2752,16 @@ textarea {
   }
 
   .rounds-hero,
+  .section-head,
   .rounds-list-head,
   .age-chart-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .section-head-actions {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .round-item {

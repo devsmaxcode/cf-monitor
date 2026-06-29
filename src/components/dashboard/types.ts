@@ -49,8 +49,10 @@ export type MetricsPanelProps = {
   columns: MetricTimeColumn[]
   countries: string[]
   country: string
+  deletingMetrics: boolean
   error: string
   loading: boolean
+  onDeleteMetricData: () => Promise<void>
   page: string
   pageIndex: number
   pages: string[]

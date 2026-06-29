@@ -14,8 +14,10 @@ function MetricsRoute() {
       columns={dashboard.columns}
       countries={dashboard.countries}
       country={dashboard.country}
+      deletingMetrics={dashboard.deletingMetrics}
       error={dashboard.error}
       loading={dashboard.loading}
+      onDeleteMetricData={dashboard.onDeleteMetricData}
       page={dashboard.page}
       pageIndex={dashboard.pageIndex}
       pages={dashboard.pages}

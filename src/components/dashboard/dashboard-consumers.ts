@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Config, MetricsPagePayload } from '#/lib/monitor.server'
-import { getMetricRowsPageFn } from '#/lib/monitor.functions'
+import {
+  deleteMetricDataFn,
+  getMetricRowsPageFn,
+} from '#/lib/monitor.functions'
 import { unique, usedProxyRows } from './helpers'
 import { useDashboardActions, useDashboardData } from './dashboard-context'
 import type { MetricFilters } from './types'
@@ -26,6 +29,8 @@ export function useMetricsConsumer() {
   )
   const [loading, setLoading] = useState(true)
   const [pageError, setPageError] = useState('')
+  const [deletingMetrics, setDeletingMetrics] = useState(false)
+  const [refreshToken, setRefreshToken] = useState(0)
 
   const countries = useMemo(
     () =>
@@ -87,7 +92,14 @@ export function useMetricsConsumer() {
     return () => {
       active = false
     }
-  }, [filters, metrics.summary.lastTimestamp, pageIndex, pageSize, rangeDays])
+  }, [
+    filters,
+    metrics.summary.lastTimestamp,
+    pageIndex,
+    pageSize,
+    rangeDays,
+    refreshToken,
+  ])
 
   const resetPage = () => setPageIndex(1)
   const setMetricQuery = (value: string) => {
@@ -114,15 +126,31 @@ export function useMetricsConsumer() {
     resetPage()
     setPageSizeState(value)
   }
+  const deleteMetricData = async () => {
+    if (deletingMetrics) return
+
+    setDeletingMetrics(true)
+    setPageError('')
+    try {
+      await deleteMetricDataFn()
+      setRefreshToken((value) => value + 1)
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDeletingMetrics(false)
+    }
+  }
 
   return {
     cacheStatus,
     columns: pagedMetrics?.columns ?? metrics.timeColumns,
     countries,
     country,
+    deletingMetrics,
     error: pageError,
     filteredRows: pagedMetrics?.rows ?? [],
     loading,
+    onDeleteMetricData: deleteMetricData,
     page: pageFilter,
     pageIndex,
     pages,

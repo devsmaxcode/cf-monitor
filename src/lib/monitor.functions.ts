@@ -70,6 +70,13 @@ export const getMetricRowsPageFn = createServerFn({ method: 'GET' })
     return getMetricRowsPage(data)
   })
 
+export const deleteMetricDataFn = createServerFn({ method: 'POST' }).handler(
+  async () => {
+    const { deleteMetricData } = await import('./monitor.server')
+    return deleteMetricData()
+  },
+)
+
 export const saveConfigFn = createServerFn({ method: 'POST' })
   .validator((input: unknown) => configSchema.parse(input))
   .handler(async ({ data }) => {

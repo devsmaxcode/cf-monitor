@@ -1,4 +1,10 @@
-import { ChevronLeft, ChevronRight, Search } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Search,
+  Trash2,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
@@ -79,6 +85,17 @@ export function MetricsPanel(props: MetricsPanelProps) {
     getRowId: (row) => row.key,
   })
   const tableRows = table.getRowModel().rows
+  const exportMatrix = () => exportMetricMatrix(pageGroups, columns)
+  const deleteMetricData = () => {
+    if (
+      props.deletingMetrics ||
+      !window.confirm('Delete all metric data from the UI?')
+    ) {
+      return
+    }
+
+    void props.onDeleteMetricData()
+  }
   const tableStyle = {
     '--matrix-country-width': `${matrixCountryColWidth}px`,
     '--matrix-min-width': `${metricMatrixMinWidth(columns)}px`,
@@ -101,9 +118,29 @@ export function MetricsPanel(props: MetricsPanelProps) {
           <span aria-hidden="true" className="section-icon">
             <Search size={16} />
           </span>
-          Metrics Matrix
+          Metrics
         </h2>
-        <span>{props.totalRows} samples</span>
+        <div className="section-head-actions">
+          <span>{props.totalRows} samples</span>
+          <button
+            className="button secondary compact-button"
+            disabled={!pageGroups.length}
+            onClick={exportMatrix}
+            type="button"
+          >
+            <Download size={16} />
+            Export CSV
+          </button>
+          <button
+            className="button danger compact-button"
+            disabled={!props.totalRows || props.deletingMetrics}
+            onClick={deleteMetricData}
+            type="button"
+          >
+            <Trash2 size={16} />
+            {props.deletingMetrics ? 'Deleting' : 'Delete all'}
+          </button>
+        </div>
       </div>
 
       <div className="table-filters">
@@ -184,9 +221,11 @@ export function MetricsPanel(props: MetricsPanelProps) {
             <span>{columns.length} rounds</span>
             <span>{props.countries.length} locations</span>
           </div>
-          <span className="matrix-range-label">
-            {start + 1}-{end} shown
-          </span>
+          <div className="matrix-actions">
+            <span className="matrix-range-label">
+              {start + 1}-{end} shown
+            </span>
+          </div>
         </div>
       ) : null}
 
@@ -361,7 +400,7 @@ function MetricsMatrixSkeleton() {
   return (
     <div
       aria-busy="true"
-      aria-label="Metrics matrix loading"
+      aria-label="Metrics  loading"
       className="table-scroll metric-table-scroll"
       style={skeletonTableStyle}
     >
@@ -444,6 +483,43 @@ function MetricStatusCellContent({ row }: { row?: MetricRow }) {
       </div>
     </>
   )
+}
+
+function exportMetricMatrix(
+  groups: MetricTimeGroup[],
+  columns: MetricTimeColumn[],
+) {
+  if (!groups.length) return
+
+  const header = [
+    'URL',
+    'Country',
+    ...columns.map((column) => `${column.label} ${column.meta}`.trim()),
+  ]
+  const rows = groups.map((group) => [
+    group.page,
+    group.countryLabel,
+    ...columns.map((column) => {
+      const row = group.cells.get(column.key)
+      return row ? `${cacheStatus(row)} ${statusMeta(row)}`.trim() : ''
+    }),
+  ])
+  const csv = [header, ...rows].map(csvRow).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `metrics-matrix-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function csvRow(values: string[]) {
+  return values.map(csvCell).join(',')
+}
+
+function csvCell(value: string) {
+  return `"${String(value).replace(/"/g, '""')}"`
 }
 
 function matrixColumnClass(id: string) {

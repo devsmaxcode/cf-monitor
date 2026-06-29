@@ -13,6 +13,7 @@ const SQL_READY = initSqlJs({
 })
 
 export const METRIC_FIELDS = [
+  'id',
   'round_id',
   'timestamp_utc',
   'round',
@@ -209,12 +210,13 @@ export async function readMetricRows(
       db,
       `
         SELECT
-          round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+          id, round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
           cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
           content_length, content_type, cache_control, server, error
         FROM cache_metrics
         WHERE
-          (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)))
+          deleted_at = ''
+          AND (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)))
           AND (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)))
         ORDER BY id ${order}
         ${limitSql}
@@ -280,7 +282,7 @@ export async function readMetricRowsPage(
           db,
           `
             SELECT
-              round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+              id, round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
               cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
               content_length, content_type, cache_control, server, error
             FROM cache_metrics
@@ -452,6 +454,36 @@ export async function applyMetricRoundRetention(
   )
 }
 
+export async function softDeleteMetricData(
+  output: string,
+  baseDir = process.cwd(),
+) {
+  return withMetricsDb(output, baseDir, true, ({ db }) => {
+    const deletedAt = nowIso()
+    const [metricCount] = selectRows(
+      db,
+      "SELECT COUNT(*) AS count FROM cache_metrics WHERE deleted_at = ''",
+    )
+    const [roundCount] = selectRows(
+      db,
+      "SELECT COUNT(*) AS count FROM cache_rounds WHERE deleted_at = ''",
+    )
+
+    db.run("UPDATE cache_metrics SET deleted_at = ? WHERE deleted_at = ''", [
+      deletedAt,
+    ])
+    db.run("UPDATE cache_rounds SET deleted_at = ? WHERE deleted_at = ''", [
+      deletedAt,
+    ])
+
+    return {
+      deletedMetrics: integer(metricCount?.count),
+      deletedRounds: integer(roundCount?.count),
+      ok: true,
+    }
+  })
+}
+
 export async function readAppSetting(
   key: AppSettingKey,
   output = DEFAULT_METRICS_DB,
@@ -502,6 +534,8 @@ export async function readMetricRounds(
           recheck_rows, page_count, proxy_country_count, config_json, error, created_at
         FROM cache_rounds
         WHERE
+          deleted_at = ''
+          AND
           (
             ? IS NULL
             OR status = 'running'
@@ -525,7 +559,7 @@ async function withMetricsDb<T>(
   persist: boolean,
   callback: (handle: DbHandle) => T,
 ) {
-  const handle = await openMetricsDb(output, baseDir)
+  const handle = await openMetricsDb(output, baseDir, persist)
   try {
     const result = callback(handle)
     if (persist) await persistDb(handle)
@@ -538,16 +572,16 @@ async function withMetricsDb<T>(
 async function openMetricsDb(
   output: string,
   baseDir = process.cwd(),
+  persist = false,
 ): Promise<DbHandle> {
   const filename = resolveMetricsDbPath(output, baseDir)
-  await mkdir(dirname(filename), { recursive: true })
+  if (persist) await mkdir(dirname(filename), { recursive: true })
 
   const SQL = await SQL_READY
   const db = new SQL.Database(
     (await exists(filename)) ? await readFile(filename) : undefined,
   )
   ensureMetricsSchema(db)
-  await persistDb({ db, filename })
   return { db, filename }
 }
 
@@ -592,6 +626,7 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
       proxy_country_count INTEGER NOT NULL DEFAULT 0,
       config_json TEXT NOT NULL DEFAULT '',
       error TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
@@ -616,10 +651,13 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
       cache_control TEXT NOT NULL DEFAULT '',
       server TEXT NOT NULL DEFAULT '',
       error TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
   addRoundIdColumnIfMissing(db)
+  addDeletedAtColumnIfMissing(db, 'cache_rounds')
+  addDeletedAtColumnIfMissing(db, 'cache_metrics')
   backfillLegacyRound(db)
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_cache_rounds_status ON cache_rounds (status)',
@@ -638,6 +676,9 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
   )
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_cache_metrics_status ON cache_metrics (cf_cache_status)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_deleted_at ON cache_metrics (deleted_at)',
   )
 }
 
@@ -703,6 +744,15 @@ function backfillLegacyRound(db: SqlJsDatabase) {
   ])
 }
 
+function addDeletedAtColumnIfMissing(
+  db: SqlJsDatabase,
+  table: 'cache_metrics' | 'cache_rounds',
+) {
+  const columns = selectRows(db, `PRAGMA table_info(${table})`)
+  if (columns.some((column) => value(column.name) === 'deleted_at')) return
+  db.run(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''`)
+}
+
 function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
   const row = selectRows(
     db,
@@ -711,7 +761,7 @@ function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
         COUNT(*) AS total_rows,
         SUM(CASE WHEN round LIKE '%-recheck' THEN 1 ELSE 0 END) AS recheck_rows
       FROM cache_metrics
-      WHERE round_id = ?
+      WHERE round_id = ? AND deleted_at = ''
     `,
     [roundId],
   ).at(0)
@@ -787,6 +837,8 @@ function metricQueryWhere(
 ): MetricSqlFilter {
   const clauses: string[] = []
   const params: unknown[] = []
+
+  clauses.push("deleted_at = ''")
 
   if (range.sinceIso) {
     clauses.push(
