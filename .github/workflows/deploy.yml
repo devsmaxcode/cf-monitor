@@ -208,7 +208,32 @@ jobs:
           pm2 save
 
           pm2 describe "$PM2_APP_NAME" >/dev/null
-          bun --eval "const res = await fetch('http://127.0.0.1:$APP_PORT/'); if (!res.ok) process.exit(1);"
+
+          HEALTH_HOST="$APP_HOST"
+          case "$HEALTH_HOST" in
+            ""|"0.0.0.0"|"::")
+              HEALTH_HOST="127.0.0.1"
+              ;;
+          esac
+          export HEALTH_URL="http://$HEALTH_HOST:$APP_PORT/"
+
+          healthy=0
+          for attempt in $(seq 1 30); do
+            if bun --eval "const res = await fetch(process.env.HEALTH_URL); if (!res.ok) process.exit(1);" >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" -ne 1 ]; then
+            echo "App did not become healthy at $HEALTH_URL"
+            pm2 describe "$PM2_APP_NAME" || true
+            pm2 logs "$PM2_APP_NAME" --lines 80 --nostream || true
+            exit 1
+          fi
+
+          echo "App health check passed: $HEALTH_URL"
           EOF
 
       - name: Public Health Check
