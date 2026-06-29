@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import type { Config } from '#/lib/monitor.server'
-import { filterRows, unique, usedProxyRows } from './helpers'
+import type { Config, MetricsPagePayload } from '#/lib/monitor.server'
+import { getMetricRowsPageFn } from '#/lib/monitor.functions'
+import { unique, usedProxyRows } from './helpers'
 import { useDashboardActions, useDashboardData } from './dashboard-context'
 import type { MetricFilters } from './types'
 
@@ -15,41 +16,111 @@ export function useMetricsConsumer() {
   const { setRangeDays } = useDashboardActions()
   const [query, setQuery] = useState('')
   const [country, setCountry] = useState('')
-  const [page, setPage] = useState('')
+  const [pageFilter, setPageFilter] = useState('')
   const [cacheStatus, setCacheStatus] = useState('')
+  const [pageIndex, setPageIndex] = useState(1)
+  const [pageSize, setPageSizeState] = useState(50)
+  const [pagedMetrics, setPagedMetrics] = useState<MetricsPagePayload | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [pageError, setPageError] = useState('')
 
-  const filteredRows = useMemo(
-    () => filterRows(metrics.rows, { cacheStatus, country, page, query } satisfies MetricFilters),
-    [cacheStatus, country, metrics.rows, page, query],
-  )
   const countries = useMemo(
-    () => unique(metrics.rows.map((row) => row.proxy_country || 'unknown')),
-    [metrics.rows],
+    () => pagedMetrics?.countries ?? unique(metrics.rows.map((row) => row.proxy_country || 'unknown')),
+    [metrics.rows, pagedMetrics?.countries],
   )
   const pages = useMemo(
-    () => unique(metrics.rows.map((row) => row.page || '').filter(Boolean)),
-    [metrics.rows],
+    () => pagedMetrics?.pages ?? unique(metrics.rows.map((row) => row.page || '').filter(Boolean)),
+    [metrics.rows, pagedMetrics?.pages],
   )
   const statuses = useMemo(
-    () => unique(metrics.rows.map((row) => (row.cf_cache_status || (row.error ? 'FAIL' : '-')).toUpperCase())),
-    [metrics.rows],
+    () =>
+      pagedMetrics?.statuses ??
+      unique(metrics.rows.map((row) => (row.cf_cache_status || (row.error ? 'FAIL' : '-')).toUpperCase())),
+    [metrics.rows, pagedMetrics?.statuses],
   )
+  const filters = useMemo(
+    () => ({ cacheStatus, country, page: pageFilter, query } satisfies MetricFilters),
+    [cacheStatus, country, pageFilter, query],
+  )
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setPageError('')
+
+    void getMetricRowsPageFn({
+      data: {
+        days: rangeDays,
+        filters,
+        page: pageIndex,
+        pageSize,
+      },
+    })
+      .then((payload) => {
+        if (active) setPagedMetrics(payload)
+      })
+      .catch((error: unknown) => {
+        if (active) setPageError(error instanceof Error ? error.message : String(error))
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [filters, metrics.summary.lastTimestamp, pageIndex, pageSize, rangeDays])
+
+  const resetPage = () => setPageIndex(1)
+  const setMetricQuery = (value: string) => {
+    resetPage()
+    setQuery(value)
+  }
+  const setMetricCountry = (value: string) => {
+    resetPage()
+    setCountry(value)
+  }
+  const setMetricPage = (value: string) => {
+    resetPage()
+    setPageFilter(value)
+  }
+  const setMetricCacheStatus = (value: string) => {
+    resetPage()
+    setCacheStatus(value)
+  }
+  const setMetricRangeDays = (value: typeof rangeDays) => {
+    resetPage()
+    setRangeDays(value)
+  }
+  const setPageSize = (value: number) => {
+    resetPage()
+    setPageSizeState(value)
+  }
 
   return {
     cacheStatus,
+    columns: pagedMetrics?.columns ?? metrics.timeColumns,
     countries,
     country,
-    filteredRows,
-    page,
+    error: pageError,
+    filteredRows: pagedMetrics?.rows ?? [],
+    loading,
+    page: pageFilter,
+    pageIndex,
     pages,
+    pageSize,
     query,
     rangeDays,
-    setCacheStatus,
-    setCountry,
-    setPage,
-    setQuery,
-    setRangeDays,
+    setCacheStatus: setMetricCacheStatus,
+    setCountry: setMetricCountry,
+    setPage: setMetricPage,
+    setPageIndex,
+    setPageSize,
+    setQuery: setMetricQuery,
+    setRangeDays: setMetricRangeDays,
     statuses,
+    totalGroups: pagedMetrics?.totalGroups ?? 0,
+    totalRows: pagedMetrics?.totalRows ?? metrics.summary.totalRows,
   }
 }
 

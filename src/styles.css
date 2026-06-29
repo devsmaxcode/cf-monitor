@@ -938,6 +938,11 @@ h3 {
   overflow: hidden;
 }
 
+.samples-panel[data-metrics-view] {
+  display: block;
+  width: 100%;
+}
+
 .section-icon {
   align-items: center;
   background: var(--accent-soft);
@@ -1065,15 +1070,17 @@ h3 {
 }
 
 .metric-table-scroll {
-  max-height: clamp(320px, calc(100dvh - 280px), 70vh);
+  height: min(var(--matrix-scroll-height, 70vh), 70vh);
+  max-height: 70vh;
   overflow: auto;
-  scrollbar-gutter: stable;
+  width: 100%;
 }
 
 .matrix-empty-state {
   align-items: center;
   color: var(--muted);
   display: flex;
+  height: auto;
   justify-content: center;
   min-height: 126px;
   padding: 34px 20px;
@@ -1234,7 +1241,7 @@ h3 {
 
 .sample-table.metric-matrix {
   min-width: var(--matrix-min-width);
-  width: var(--matrix-min-width);
+  width: 100%;
 }
 
 .metric-matrix th:first-child,

@@ -1,17 +1,19 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { dirname as fileDirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
   createMetricRound,
   DEFAULT_METRICS_DB,
   finalizeMetricRound,
   normalizeMetricsOutput,
+  readMetricRowsPage,
   readMetricRows,
   readMetricRounds,
+  type MetricColumnSummary,
   type MetricDateRange,
+  type MetricRowFilters,
   type MetricRow,
+  type MetricRoundRow,
 } from './metrics-db'
 import { METRIC_RETENTION_DAYS, type MetricRangeDays } from './metric-range'
 export { metricRangeDayOptions, type MetricRangeDays } from './metric-range'
@@ -62,6 +64,7 @@ export type CrawlProgress = {
 }
 
 export type MetricsPayload = Awaited<ReturnType<typeof buildMetrics>>
+export type MetricsPagePayload = Awaited<ReturnType<typeof getMetricRowsPage>>
 
 export type DashboardPayload = {
   config: Config
@@ -75,13 +78,15 @@ export type DashboardPayload = {
 }
 
 const metricDayMs = 24 * 60 * 60 * 1000
-const here = fileDirname(fileURLToPath(import.meta.url))
-const root = resolve(here, '../..')
+const dashboardMetricRowLimit = 1500
+const root = resolve(process.env.APP_ROOT || process.cwd())
 const storageDir = join(root, 'storage')
 const configPath = join(storageDir, 'dashboard-config.json')
+const runtimePath = join(storageDir, 'monitor-runtime.json')
 const pagesPath = join(storageDir, 'pages.txt')
 const proxiesPath = join(storageDir, 'proxies.txt')
 const legacyDefaultBaseUrl = 'https://ummah.one'
+const activeRoundMaxAgeMs = 24 * 60 * 60 * 1000
 
 const defaultPages = [
   'https://ummah.one/',
@@ -131,6 +136,17 @@ const state: MonitorState = {
   logs: [],
 }
 
+type StoredMonitorState = {
+  running: boolean
+  startedAt: string | null
+  lastRunAt: string | null
+  nextRunAt: string | null
+  lastExitCode: number | null
+  lastReason: string | null
+  lastError: string | null
+  updatedAt: string
+}
+
 let scheduledJob: ReturnType<typeof setTimeout> | null = null
 let activeMonitorProcess: ChildProcessWithoutNullStreams | null = null
 let stopRequested = false
@@ -142,6 +158,53 @@ async function exists(path: string) {
     return true
   } catch {
     return false
+  }
+}
+
+async function readStoredMonitorState(): Promise<StoredMonitorState | null> {
+  if (!(await exists(runtimePath))) return null
+
+  try {
+    return normalizeStoredMonitorState(JSON.parse(await readFile(runtimePath, 'utf8')))
+  } catch (error) {
+    pushLog(`runtime state read failed: ${errorMessage(error)}`)
+    return null
+  }
+}
+
+async function persistMonitorState() {
+  await mkdir(storageDir, { recursive: true })
+  const payload: StoredMonitorState = {
+    running: state.running,
+    startedAt: state.startedAt,
+    lastRunAt: state.lastRunAt,
+    nextRunAt: state.nextRunAt,
+    lastExitCode: state.lastExitCode,
+    lastReason: state.lastReason,
+    lastError: state.lastError,
+    updatedAt: new Date().toISOString(),
+  }
+  await writeFile(runtimePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+  return payload
+}
+
+function persistMonitorStateSoon() {
+  void persistMonitorState().catch((error) =>
+    pushLog(`runtime state write failed: ${errorMessage(error)}`),
+  )
+}
+
+function normalizeStoredMonitorState(value: unknown): StoredMonitorState {
+  const row = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    running: Boolean(row.running),
+    startedAt: nullableString(row.startedAt),
+    lastRunAt: nullableString(row.lastRunAt),
+    nextRunAt: nullableString(row.nextRunAt),
+    lastExitCode: nullableNumber(row.lastExitCode),
+    lastReason: nullableString(row.lastReason),
+    lastError: nullableString(row.lastError),
+    updatedAt: nullableString(row.updatedAt) || new Date(0).toISOString(),
   }
 }
 
@@ -193,7 +256,11 @@ export async function saveConfig(config: Config) {
   await mkdir(storageDir, { recursive: true })
   const sanitized = sanitizeConfig(config)
   await writeFile(configPath, `${JSON.stringify(sanitized, null, 2)}\n`, 'utf8')
-  if (state.running && !state.busy) void scheduleNext(sanitized)
+  const stored = await readStoredMonitorState()
+  if ((state.running || stored?.running) && !state.busy) {
+    state.running = true
+    await scheduleNext(sanitized)
+  }
   return sanitized
 }
 
@@ -224,15 +291,42 @@ export async function getDashboard(days: MetricRangeDays): Promise<DashboardPayl
     config,
     metrics,
     proxies,
-    status: snapshotState(),
+    status: await snapshotState(config, metrics.rounds),
   }
 }
 
 export async function getRuntime(days: MetricRangeDays) {
   const config = await readConfig()
+  const metrics = await buildMetrics(config, metricRange(days))
   return {
-    metrics: await buildMetrics(config, metricRange(days)),
-    status: snapshotState(),
+    metrics,
+    status: await snapshotState(config, metrics.rounds),
+  }
+}
+
+export async function getMetricRowsPage(input: {
+  days: MetricRangeDays
+  filters?: MetricRowFilters
+  page?: number
+  pageSize?: number
+}) {
+  const config = await readConfig()
+  const range = metricRange(input.days)
+  const payload = await readMetricRowsPage(config.output, root, {
+    filters: input.filters,
+    page: input.page,
+    pageSize: input.pageSize,
+    sinceIso: range.sinceIso,
+  })
+
+  return {
+    ...payload,
+    columns: metricColumnsFromSummaries(payload.columns),
+    range: {
+      ...range,
+      availableFrom: payload.availableFrom,
+      availableTo: payload.availableTo,
+    },
   }
 }
 
@@ -241,20 +335,23 @@ export async function startMonitor() {
   state.running = true
   state.startedAt = new Date().toISOString()
   void runMonitorRound('start')
+  await persistMonitorState()
   return snapshotState()
 }
 
-export function stopMonitor() {
+export async function stopMonitor() {
   state.running = false
   state.nextRunAt = null
   clearScheduledJob()
   stopActiveMonitor()
   pushLog(`[${new Date().toLocaleString()}] monitor stopped`)
+  await persistMonitorState()
   return snapshotState()
 }
 
-export function runOnce() {
+export async function runOnce() {
   void runMonitorRound('manual')
+  await persistMonitorState()
   return snapshotState()
 }
 
@@ -293,12 +390,54 @@ function pushLog(line: string) {
   state.logs = state.logs.slice(-160)
 }
 
-function snapshotState(): MonitorState {
+async function snapshotState(config?: Config, rounds: MetricRoundRow[] = []): Promise<MonitorState> {
+  const stored = await readStoredMonitorState()
+  const activeRound = activeMetricRound(rounds)
+  const activeRoundArmed = activeRound ? roundKeepsMonitorArmed(activeRound) : false
+  const storedRunning = Boolean(stored?.running || activeRoundArmed)
+  const running = state.running || storedRunning
+  const busy = state.busy || Boolean(activeRound)
+
+  if (storedRunning && !state.running) {
+    state.running = true
+    state.startedAt = state.startedAt || stored?.startedAt || activeRound?.started_at || null
+    state.lastRunAt = state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null
+    state.lastReason = state.lastReason || activeRound?.reason || stored?.lastReason || null
+    state.nextRunAt = state.nextRunAt || stored?.nextRunAt || null
+    if (activeRoundArmed && !stored?.running) persistMonitorStateSoon()
+  }
+
+  if (config && running && !busy && !state.nextRunAt && stored?.nextRunAt) {
+    state.nextRunAt = stored.nextRunAt
+  }
+
   return {
     ...state,
-    crawl: state.crawl ? { ...state.crawl } : null,
+    running,
+    busy,
+    round: state.round || activeRound?.id || 0,
+    crawl: state.busy && state.crawl ? { ...state.crawl } : null,
+    startedAt: state.startedAt || activeRound?.started_at || stored?.startedAt || null,
+    lastRunAt: state.lastRunAt || activeRound?.started_at || stored?.lastRunAt || null,
+    nextRunAt: busy ? null : state.nextRunAt || (running ? stored?.nextRunAt || null : null),
+    lastExitCode: state.lastExitCode ?? stored?.lastExitCode ?? null,
+    lastReason: state.lastReason || activeRound?.reason || stored?.lastReason || null,
+    lastError: state.lastError || activeRound?.error || stored?.lastError || null,
     logs: [...state.logs],
   }
+}
+
+function activeMetricRound(rounds: MetricRoundRow[]) {
+  return rounds.find((round) => round.status === 'running' && !staleMetricRound(round))
+}
+
+function roundKeepsMonitorArmed(round: MetricRoundRow) {
+  return round.reason === 'start' || round.reason === 'schedule'
+}
+
+function staleMetricRound(round: MetricRoundRow) {
+  const started = Date.parse(round.started_at || round.created_at || '')
+  return Number.isFinite(started) && Date.now() - started > activeRoundMaxAgeMs
 }
 
 async function pipeProcessOutput(stream: NodeJS.ReadableStream | null, label = '') {
@@ -357,6 +496,7 @@ async function runMonitorRound(reason: string) {
   state.lastReason = reason
   state.lastError = null
   state.nextRunAt = null
+  persistMonitorStateSoon()
 
   let config: Config | null = null
   let proc: ChildProcessWithoutNullStreams | null = null
@@ -386,6 +526,7 @@ async function runMonitorRound(reason: string) {
     roundId = round.id
     state.round = roundId
     state.crawl = { ...state.crawl, round: roundId }
+    persistMonitorStateSoon()
 
     if (stopRequested) {
       pushLog(`[${new Date().toLocaleString()}] round ${roundId} stopped before collector start`)
@@ -462,6 +603,9 @@ async function runMonitorRound(reason: string) {
     if (activeMonitorProcess === proc) activeMonitorProcess = null
     stopRequested = false
     state.busy = false
+    await persistMonitorState().catch((error) =>
+      pushLog(`runtime state write failed: ${errorMessage(error)}`),
+    )
   }
 
   if (state.running) void scheduleNextFromSavedConfig()
@@ -557,10 +701,17 @@ async function scheduleNext(config: Config) {
     scheduledJob = null
     void runMonitorRound('schedule')
   }, Math.max(0, next.getTime() - Date.now()))
+  await persistMonitorState()
 }
 
 async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION_DAYS)) {
-  const rows = await readMetricRows(config.output, root, { sinceIso: range.sinceIso })
+  const rows = (
+    await readMetricRows(config.output, root, {
+      limit: dashboardMetricRowLimit,
+      order: 'desc',
+      sinceIso: range.sinceIso,
+    })
+  ).reverse()
   const rounds = await readMetricRounds(config.output, root, { sinceIso: range.sinceIso })
   const timeColumns = metricTimeColumns(rows)
   const latest = new Map<string, MetricRow>()
@@ -608,7 +759,10 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
 
   const summary = {
     totalRounds: rounds.length,
-    totalRows: rows.length,
+    totalRows: Math.max(
+      rows.length,
+      rounds.reduce((sum, round) => sum + round.total_rows, 0),
+    ),
     latestCells: latestRows.length,
     latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT').length,
     latestMissLike: latestRows.filter(isMissLike).length,
@@ -634,6 +788,25 @@ async function buildMetrics(config: Config, range = metricRange(METRIC_RETENTION
       availableTo: rows.at(-1)?.timestamp_utc || rounds[0]?.completed_at || rounds[0]?.started_at || null,
     },
   }
+}
+
+function metricColumnsFromSummaries(summaries: MetricColumnSummary[]) {
+  return summaries.map((summary) => {
+    const column = metricBatchColumn({
+      round: summary.round,
+      round_id: summary.round_id,
+      timestamp_utc: summary.started_at,
+    })
+    const start = Date.parse(summary.started_at || '')
+    const end = Date.parse(summary.completed_at || summary.started_at || '')
+
+    if (Number.isNaN(start)) return column
+    return {
+      ...column,
+      meta: batchTimeRange(start, Number.isNaN(end) ? start : end),
+      sort: metricTimeColumn(summary.started_at).sort,
+    }
+  })
 }
 
 function metricRange(days: MetricRangeDays) {
@@ -695,9 +868,17 @@ function metricTimeColumn(value: string): MetricTimeColumn {
 
 function metricBatchColumn(row: MetricRow): MetricTimeColumn {
   const column = metricTimeColumn(row.timestamp_utc || '')
-  const round = row.round || row.round_id
-  if (!round) return column
-  return { ...column, key: `batch-${round}`, label: `Batch ${round}` }
+  const roundValue = row.round || row.round_id
+  if (!roundValue) return column
+
+  const roundText = String(roundValue)
+  const recheck = roundText.endsWith('-recheck')
+  const round = recheck ? roundText.replace(/-recheck$/, '') : roundText
+  return {
+    ...column,
+    key: `batch-${roundText}`,
+    label: recheck ? `Recheck ${round}` : `Round ${round}`,
+  }
 }
 
 function batchTimeRange(start: number, end: number) {
@@ -740,4 +921,15 @@ function average(values: number[]) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function nullableString(value: unknown) {
+  const text = value == null ? '' : String(value)
+  return text || null
+}
+
+function nullableNumber(value: unknown) {
+  if (value == null) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
 }

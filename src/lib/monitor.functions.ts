@@ -11,6 +11,19 @@ const daysSchema = z.object({
     ),
 })
 
+const metricFiltersSchema = z.object({
+  cacheStatus: z.string().optional(),
+  country: z.string().optional(),
+  page: z.string().optional(),
+  query: z.string().optional(),
+})
+
+const metricRowsPageSchema = daysSchema.extend({
+  filters: metricFiltersSchema.optional(),
+  page: z.number().int().min(1).optional(),
+  pageSize: z.number().int().min(1).max(200).optional(),
+})
+
 const configSchema: z.ZodType<Config> = z
   .object({
     pages: z.array(z.string()),
@@ -42,6 +55,13 @@ export const getRuntimeFn = createServerFn({ method: 'GET' })
   .handler(async ({ data }) => {
     const { getRuntime } = await import('./monitor.server')
     return getRuntime(data.days)
+  })
+
+export const getMetricRowsPageFn = createServerFn({ method: 'GET' })
+  .validator((input: unknown) => metricRowsPageSchema.parse(input))
+  .handler(async ({ data }) => {
+    const { getMetricRowsPage } = await import('./monitor.server')
+    return getMetricRowsPage(data)
   })
 
 export const saveConfigFn = createServerFn({ method: 'POST' })

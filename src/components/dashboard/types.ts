@@ -6,6 +6,7 @@ import type {
   MonitorState,
 } from '#/lib/monitor.server'
 import type { MetricRoundRow } from '#/lib/metrics-db'
+import type { MetricTimeColumn } from './helpers'
 
 export type DashboardSection = 'metrics' | 'rounds' | 'age' | 'config' | 'proxies' | 'logs'
 export type MetricRow = MetricsPayload['rows'][number]
@@ -44,19 +45,28 @@ export type ConfigPanelProps = {
 
 export type MetricsPanelProps = {
   cacheStatus: string
+  columns: MetricTimeColumn[]
   countries: string[]
   country: string
+  error: string
+  loading: boolean
   page: string
+  pageIndex: number
   pages: string[]
+  pageSize: number
   query: string
   rangeDays: MetricRangeDays
   rows: MetricRow[]
   setCacheStatus: (value: string) => void
   setCountry: (value: string) => void
   setPage: (value: string) => void
+  setPageIndex: (value: number | ((current: number) => number)) => void
+  setPageSize: (value: number) => void
   setQuery: (value: string) => void
   setRangeDays: (value: MetricRangeDays) => void
   statuses: string[]
+  totalGroups: number
+  totalRows: number
 }
 
 export type RoundsPanelProps = {

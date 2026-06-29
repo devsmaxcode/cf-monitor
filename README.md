@@ -50,18 +50,16 @@ pnpm check
 ```
 
 
-## Deploy with Nitro
+## Deploy with Bun
 
-This project uses Nitro as a generic server adapter, so it can run on any Node-compatible host.
+This project builds TanStack Start into `dist/` and runs it with the local Bun adapter in `scripts/start-server.mjs`.
 
 ```bash
-npm run build
-node dist/server/index.mjs
+bun run build
+bun run start
 ```
 
-The build output is a self-contained Node server. To deploy, push the `dist/` directory to your host (Render, Fly.io, your own VPS, etc.) and run the server command above.
-
-For host-specific presets (Vercel, Netlify, Cloudflare, AWS Lambda, etc.) and tuning, see https://v3.nitro.build/deploy.
+Set `PORT`/`HOST` or `APP_PORT`/`APP_HOST` for the bind address. The GitHub workflow uploads the built `dist/` artifact, syncs it to the VPS, and restarts PM2 with `ecosystem.config.cjs`.
 
 
 ## Shadcn

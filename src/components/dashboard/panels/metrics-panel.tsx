@@ -15,7 +15,6 @@ import {
   metricMatrixMinWidth,
   metricRangeLabel,
   metricStatusDetails,
-  metricTimeColumns,
   metricTimeGroups,
   matrixCountryColWidth,
   matrixTimeColWidth,
@@ -46,28 +45,30 @@ const skeletonRowKeys = [
   'page-15',
   'page-16',
 ] as const
+const matrixHeaderHeight = 58
+const matrixRowHeight = 56
+const matrixScrollbarHeight = 18
 const skeletonTableStyle = {
   '--matrix-country-width': `${matrixCountryColWidth}px`,
   '--matrix-min-width': `${matrixUrlColWidth + matrixCountryColWidth + skeletonColumnKeys.length * matrixTimeColWidth}px`,
+  '--matrix-scroll-height': `${matrixHeaderHeight + skeletonRowKeys.length * matrixRowHeight + matrixScrollbarHeight}px`,
   '--matrix-time-width': `${matrixTimeColWidth}px`,
   '--matrix-url-width': `${matrixUrlColWidth}px`,
 } as CSSProperties
 
 export function MetricsPanel(props: MetricsPanelProps) {
   const [mounted, setMounted] = useState(false)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState<(typeof pageSizeOptions)[number]>(50)
   const matrixRows = mounted ? props.rows : []
-  const columns = useMemo(() => metricTimeColumns(matrixRows), [matrixRows])
+  const columns = mounted ? props.columns : []
   const groups = useMemo(
     () => metricTimeGroups(matrixRows, columns),
     [columns, matrixRows],
   )
-  const pageCount = Math.max(1, Math.ceil(groups.length / pageSize))
-  const safePage = Math.min(page, pageCount)
-  const start = (safePage - 1) * pageSize
-  const end = Math.min(start + pageSize, groups.length)
-  const pageGroups = groups.slice(start, end)
+  const pageCount = Math.max(1, Math.ceil(props.totalGroups / props.pageSize))
+  const safePage = Math.min(props.pageIndex, pageCount)
+  const start = props.totalGroups ? (safePage - 1) * props.pageSize : 0
+  const pageGroups = groups
+  const end = props.totalGroups ? Math.min(start + pageGroups.length, props.totalGroups) : 0
   const tableColumns = useMetricMatrixColumns(columns)
   const table = useReactTable({
     columns: tableColumns,
@@ -75,27 +76,21 @@ export function MetricsPanel(props: MetricsPanelProps) {
     getCoreRowModel: getCoreRowModel(),
     getRowId: (row) => row.key,
   })
+  const tableRows = table.getRowModel().rows
   const tableStyle = {
     '--matrix-country-width': `${matrixCountryColWidth}px`,
     '--matrix-min-width': `${metricMatrixMinWidth(columns)}px`,
+    '--matrix-scroll-height': `${matrixHeaderHeight + tableRows.length * matrixRowHeight + matrixScrollbarHeight}px`,
     '--matrix-time-width': `${matrixTimeColWidth}px`,
     '--matrix-url-width': `${matrixUrlColWidth}px`,
   } as CSSProperties
-
   useEffect(() => {
     setMounted(true)
   }, [])
 
   useEffect(() => {
-    setPage(1)
-  }, [
-    props.cacheStatus,
-    props.country,
-    props.page,
-    props.query,
-    props.rangeDays,
-    pageSize,
-  ])
+    if (props.pageIndex !== safePage) props.setPageIndex(safePage)
+  }, [props.pageIndex, props.setPageIndex, safePage])
 
   return (
     <section className="samples-panel" data-metrics-view>
@@ -106,7 +101,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
           </span>
           Metrics Matrix
         </h2>
-        <span>{props.rows.length} samples</span>
+        <span>{props.totalRows} samples</span>
       </div>
 
       <div className="table-filters">
@@ -178,10 +173,12 @@ export function MetricsPanel(props: MetricsPanelProps) {
         </label>
       </div>
 
+      {props.error ? <div className="notice error">{props.error}</div> : null}
+
       {mounted && pageGroups.length ? (
         <div className="matrix-toolbar">
           <div className="matrix-chip-row" aria-label="Metrics matrix summary">
-            <span>{groups.length} rows</span>
+            <span>{props.totalGroups} rows</span>
             <span>{columns.length} rounds</span>
             <span>{props.countries.length} locations</span>
           </div>
@@ -191,11 +188,11 @@ export function MetricsPanel(props: MetricsPanelProps) {
         </div>
       ) : null}
 
-      {mounted ? (
+      {mounted && (!props.loading || pageGroups.length) ? (
         <>
           {pageGroups.length ? (
-            <div className="table-scroll metric-table-scroll">
-              <table className="sample-table metric-matrix" style={tableStyle}>
+            <div className="table-scroll metric-table-scroll" style={tableStyle}>
+              <table className="sample-table metric-matrix">
                 <colgroup>
                   {table.getAllLeafColumns().map((column) => (
                     <col className={matrixColumnClass(column.id)} key={column.id} />
@@ -219,7 +216,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
                   ))}
                 </thead>
                 <tbody>
-                  {table.getRowModel().rows.map((row) => (
+                  {tableRows.map((row) => (
                     <tr key={row.id}>
                       {row.getVisibleCells().map((cell) => {
                         const cellClass = matrixCellClass(cell.column.id)
@@ -250,15 +247,15 @@ export function MetricsPanel(props: MetricsPanelProps) {
               Rows
               <div className="page-size-dropdown">
                 <button className="page-size-trigger" type="button">
-                  <span>{pageSize}</span>
+                  <span>{props.pageSize}</span>
                   <i aria-hidden="true" />
                 </button>
                 <div className="page-size-options">
                   {pageSizeOptions.map((size) => (
                     <button
-                      className={pageSize === size ? 'selected' : ''}
+                      className={props.pageSize === size ? 'selected' : ''}
                       key={size}
-                      onClick={() => setPageSize(size)}
+                      onClick={() => props.setPageSize(size)}
                       type="button"
                     >
                       {size}
@@ -268,14 +265,14 @@ export function MetricsPanel(props: MetricsPanelProps) {
               </div>
             </div>
             <span className="pagination-range">
-              Showing {groups.length ? start + 1 : 0}-{end} of {groups.length}
+              Showing {props.totalGroups ? start + 1 : 0}-{end} of {props.totalGroups}
             </span>
             <div className="page-controls">
               <button
                 aria-label="Previous page"
                 className="icon-button compact"
                 disabled={safePage <= 1}
-                onClick={() => setPage((value) => Math.max(1, value - 1))}
+                onClick={() => props.setPageIndex((value) => Math.max(1, value - 1))}
                 title="Previous page"
                 type="button"
               >
@@ -289,7 +286,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
                 className="icon-button compact"
                 disabled={safePage >= pageCount}
                 onClick={() =>
-                  setPage((value) => Math.min(pageCount, value + 1))
+                  props.setPageIndex((value) => Math.min(pageCount, value + 1))
                 }
                 title="Next page"
                 type="button"
@@ -344,11 +341,11 @@ function MetricsMatrixSkeleton() {
       aria-busy="true"
       aria-label="Metrics matrix loading"
       className="table-scroll metric-table-scroll"
+      style={skeletonTableStyle}
     >
       <table
         aria-hidden="true"
         className="sample-table metric-matrix metric-matrix-skeleton"
-        style={skeletonTableStyle}
       >
         <colgroup>
           <col className="matrix-url-col" />

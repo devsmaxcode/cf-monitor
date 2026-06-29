@@ -1,6 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
 import { METRIC_RETENTION_DAYS } from './metric-range.ts'
 
@@ -8,7 +7,7 @@ export const DEFAULT_METRICS_DB = 'storage/cloudflare-cache-metrics.sqlite'
 export { METRIC_RETENTION_DAYS } from './metric-range.ts'
 
 const DAY_MS = 24 * 60 * 60 * 1000
-const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const projectRoot = resolve(process.env.APP_ROOT || process.cwd())
 const SQL_READY = initSqlJs({
   locateFile: (file) => join(projectRoot, 'node_modules', 'sql.js', 'dist', file),
 })
@@ -71,6 +70,45 @@ type FinalizeMetricRoundInput = {
 export type MetricDateRange = {
   sinceIso?: string
   untilIso?: string
+}
+
+export type MetricRowsQuery = MetricDateRange & {
+  limit?: number
+  order?: 'asc' | 'desc'
+}
+
+export type MetricRowFilters = {
+  cacheStatus?: string
+  country?: string
+  page?: string
+  query?: string
+}
+
+export type MetricColumnSummary = {
+  completed_at: string
+  round: string
+  round_id: string
+  started_at: string
+}
+
+export type MetricRowsPageInput = MetricDateRange & {
+  filters?: MetricRowFilters
+  page?: number
+  pageSize?: number
+}
+
+export type MetricRowsPage = {
+  availableFrom: string | null
+  availableTo: string | null
+  columns: MetricColumnSummary[]
+  countries: string[]
+  page: number
+  pages: string[]
+  pageSize: number
+  rows: MetricRow[]
+  statuses: string[]
+  totalGroups: number
+  totalRows: number
 }
 
 type DbHandle = {
@@ -140,10 +178,15 @@ export async function appendMetricRows(output: string, rows: MetricRow[], baseDi
 export async function readMetricRows(
   output: string,
   baseDir = process.cwd(),
-  dateRange: MetricDateRange = {},
+  dateRange: MetricRowsQuery = {},
 ) {
   return withMetricsDb(output, baseDir, false, ({ db }) => {
     const range = normalizeMetricDateRange(dateRange)
+    const order = dateRange.order === 'desc' ? 'DESC' : 'ASC'
+    const limit = boundedInteger(dateRange.limit, 0, 100000, 0)
+    const params: unknown[] = [range.sinceIso, range.sinceIso, range.untilIso, range.untilIso]
+    const limitSql = limit ? 'LIMIT ?' : ''
+    if (limit) params.push(limit)
     const rows = selectRows(
       db,
       `
@@ -155,14 +198,120 @@ export async function readMetricRows(
         WHERE
           (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)))
           AND (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)))
-        ORDER BY id ASC
+        ORDER BY id ${order}
+        ${limitSql}
       `,
-      [range.sinceIso, range.sinceIso, range.untilIso, range.untilIso],
+      params,
     )
 
-    return rows.map((row) =>
-      Object.fromEntries(METRIC_FIELDS.map((field) => [field, value(row[field])])) as MetricRow,
+    return rows.map(metricRowFromDb)
+  })
+}
+
+export async function readMetricRowsPage(
+  output: string,
+  baseDir = process.cwd(),
+  input: MetricRowsPageInput = {},
+) {
+  return withMetricsDb(output, baseDir, false, ({ db }) => {
+    const range = normalizeMetricDateRange(input)
+    const pageSize = boundedInteger(input.pageSize, 1, 200, 50)
+    const page = boundedInteger(input.page, 1, 1000000, 1)
+    const offset = (page - 1) * pageSize
+    const filtered = metricQueryWhere(range, input.filters)
+    const ranged = metricQueryWhere(range)
+    const [totalRow] = selectRows(
+      db,
+      `SELECT COUNT(*) AS count FROM cache_metrics ${filtered.where}`,
+      filtered.params,
     )
+    const [groupCountRow] = selectRows(
+      db,
+      `
+        SELECT COUNT(*) AS count
+        FROM (
+          SELECT 1
+          FROM cache_metrics
+          ${filtered.where}
+          GROUP BY page, url, proxy_country
+        )
+      `,
+      filtered.params,
+    )
+    const groupRows = selectRows(
+      db,
+      `
+        SELECT page, url, proxy_country, MIN(id) AS first_id
+        FROM cache_metrics
+        ${filtered.where}
+        GROUP BY page, url, proxy_country
+        ORDER BY first_id ASC
+        LIMIT ? OFFSET ?
+      `,
+      [...filtered.params, pageSize, offset],
+    )
+    const groupFilter = metricGroupWhere(groupRows)
+    const pageFilter = metricQueryWhere(range, input.filters, [groupFilter.sql], groupFilter.params)
+    const rows = groupRows.length
+      ? selectRows(
+          db,
+          `
+            SELECT
+              round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+              cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
+              content_length, content_type, cache_control, server, error
+            FROM cache_metrics
+            ${pageFilter.where}
+            ORDER BY id ASC
+          `,
+          pageFilter.params,
+        ).map(metricRowFromDb)
+      : []
+    const columns = selectRows(
+      db,
+      `
+        SELECT
+          CAST(round_id AS TEXT) AS round_id,
+          round,
+          MIN(timestamp_utc) AS started_at,
+          MAX(timestamp_utc) AS completed_at,
+          MIN(id) AS first_id
+        FROM cache_metrics
+        ${filtered.where}
+        GROUP BY COALESCE(NULLIF(round, ''), CAST(round_id AS TEXT), '')
+        ORDER BY first_id ASC
+      `,
+      filtered.params,
+    ).map((row) => ({
+      completed_at: value(row.completed_at),
+      round: value(row.round),
+      round_id: value(row.round_id),
+      started_at: value(row.started_at),
+    }))
+    const boundsFilter = metricQueryWhere(range, undefined, ["timestamp_utc <> ''"])
+    const [bounds] = selectRows(
+      db,
+      `
+        SELECT MIN(timestamp_utc) AS available_from, MAX(timestamp_utc) AS available_to
+        FROM cache_metrics
+        ${boundsFilter.where}
+      `,
+      boundsFilter.params,
+    )
+
+    return {
+      availableFrom: value(bounds.available_from) || null,
+      availableTo: value(bounds.available_to) || null,
+      columns,
+      countries: metricDistinctValues(db, 'proxy_country', ranged),
+      page,
+      pages: metricDistinctValues(db, 'page', ranged),
+      pageSize,
+      rows,
+      statuses: metricStatusValues(db, ranged),
+      totalGroups: integer(groupCountRow.count),
+      totalRows: integer(totalRow.count),
+    } satisfies MetricRowsPage
   })
 }
 
@@ -516,6 +665,127 @@ function selectRows(db: SqlJsDatabase, sql: string, params: unknown[] = []) {
   return rows
 }
 
+function metricRowFromDb(row: Record<string, unknown>): MetricRow {
+  return Object.fromEntries(METRIC_FIELDS.map((field) => [field, value(row[field])]))
+}
+
+type MetricSqlFilter = {
+  params: unknown[]
+  where: string
+}
+
+function metricQueryWhere(
+  range: ReturnType<typeof normalizeMetricDateRange>,
+  filters: MetricRowFilters = {},
+  extraClauses: string[] = [],
+  extraParams: unknown[] = [],
+): MetricSqlFilter {
+  const clauses: string[] = []
+  const params: unknown[] = []
+
+  if (range.sinceIso) {
+    clauses.push("timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)")
+    params.push(range.sinceIso)
+  }
+  if (range.untilIso) {
+    clauses.push("timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)")
+    params.push(range.untilIso)
+  }
+
+  const country = value(filters.country).trim()
+  if (country) {
+    clauses.push('proxy_country = ?')
+    params.push(country)
+  }
+
+  const page = value(filters.page).trim()
+  if (page) {
+    clauses.push('page = ?')
+    params.push(page)
+  }
+
+  const cacheStatus = value(filters.cacheStatus).trim().toUpperCase()
+  if (cacheStatus) {
+    clauses.push(`${metricStatusSql()} = ?`)
+    params.push(cacheStatus)
+  }
+
+  const query = value(filters.query).trim().toLowerCase()
+  if (query) {
+    clauses.push(
+      `LOWER(page || ' ' || url || ' ' || proxy_country || ' ' || cf_edge || ' ' || proxy || ' ' || error || ' ' || cf_ray || ' ' || status_code || ' ' || ${metricStatusSql()}) LIKE ?`,
+    )
+    params.push(`%${query}%`)
+  }
+
+  clauses.push(...extraClauses)
+  params.push(...extraParams)
+
+  return {
+    params,
+    where: clauses.length ? `WHERE ${clauses.map((clause) => `(${clause})`).join(' AND ')}` : '',
+  }
+}
+
+function metricGroupWhere(rows: Record<string, unknown>[]) {
+  const clauses: string[] = []
+  const params: unknown[] = []
+
+  for (const row of rows) {
+    clauses.push('(page = ? AND url = ? AND proxy_country = ?)')
+    params.push(value(row.page), value(row.url), value(row.proxy_country))
+  }
+
+  return {
+    params,
+    sql: clauses.length ? `(${clauses.join(' OR ')})` : '0',
+  }
+}
+
+function metricDistinctValues(
+  db: SqlJsDatabase,
+  field: 'page' | 'proxy_country',
+  base: MetricSqlFilter,
+) {
+  const filtered = appendMetricWhere(base, `${field} <> ''`)
+  const rows = selectRows(
+    db,
+    `
+      SELECT DISTINCT ${field} AS value
+      FROM cache_metrics
+      ${filtered.where}
+      ORDER BY value COLLATE NOCASE ASC
+    `,
+    filtered.params,
+  )
+  return rows.map((row) => value(row.value)).filter(Boolean)
+}
+
+function metricStatusValues(db: SqlJsDatabase, base: MetricSqlFilter) {
+  const rows = selectRows(
+    db,
+    `
+      SELECT DISTINCT ${metricStatusSql()} AS value
+      FROM cache_metrics
+      ${base.where}
+      ORDER BY value COLLATE NOCASE ASC
+    `,
+    base.params,
+  )
+  return rows.map((row) => value(row.value)).filter(Boolean)
+}
+
+function appendMetricWhere(base: MetricSqlFilter, clause: string, params: unknown[] = []) {
+  return {
+    params: [...base.params, ...params],
+    where: base.where ? `${base.where} AND (${clause})` : `WHERE (${clause})`,
+  }
+}
+
+function metricStatusSql() {
+  return "UPPER(CASE WHEN cf_cache_status <> '' THEN cf_cache_status WHEN error <> '' THEN 'FAIL' ELSE '-' END)"
+}
+
 function metricRoundFromDb(row: unknown): MetricRoundRow {
   const valueRow = row as Record<string, unknown>
   return {
@@ -563,6 +833,11 @@ function isoOrNull(input: unknown) {
 function integer(input: unknown, fallback = 0) {
   const number = Math.round(Number(input))
   return Number.isFinite(number) ? number : fallback
+}
+
+function boundedInteger(input: unknown, min: number, max: number, fallback: number) {
+  const number = integer(input, fallback)
+  return Math.min(max, Math.max(min, number))
 }
 
 function nowIso() {
