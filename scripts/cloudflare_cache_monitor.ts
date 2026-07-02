@@ -61,8 +61,33 @@ type ProxyItem = { url: string | null; country: string }
 type Metrics = Record<string, string>
 type RecheckTarget = { page: string; url: string; proxy: ProxyItem }
 type CheckResult = { rows: Metrics[]; rechecks: RecheckTarget[] }
+type RequestLimiter = <T>(task: () => Promise<T>) => Promise<T>
+type CollectorArgs = {
+  pages?: string
+  proxies?: string
+  proxySource: string
+  clarketmSource: string
+  clarketmStatusSource: string
+  proxyCountries: string
+  maxProxiesPerCountry: number
+  output: string
+  roundId: number
+  roundReason: string
+  rounds: number
+  interval: number
+  missRecheckDelay: number
+  timeout: number
+  delay: number
+  pageConcurrency: number
+  countryConcurrency: number
+  globalConcurrency: number
+  noDirect: boolean
+  shuffleProxies: boolean
+  userAgent: string
+  requestLimit: RequestLimiter
+}
 
-function parseArgs() {
+function parseArgs(): CollectorArgs {
   const args: Record<string, string | number | boolean> = {
     proxySource: PROXIFLY,
     clarketmSource: CLARKETM,
@@ -81,6 +106,7 @@ function parseArgs() {
     delay: 0,
     pageConcurrency: 4,
     countryConcurrency: 6,
+    globalConcurrency: 8,
     noDirect: false,
     shuffleProxies: false,
     userAgent: 'UmmahOneCacheMonitor/1.0 (+https://ummah.one)',
@@ -104,6 +130,7 @@ function parseArgs() {
     '--delay': 'delay',
     '--page-concurrency': 'pageConcurrency',
     '--country-concurrency': 'countryConcurrency',
+    '--global-concurrency': 'globalConcurrency',
     '--user-agent': 'userAgent',
   }
 
@@ -128,6 +155,7 @@ function parseArgs() {
         'delay',
         'pageConcurrency',
         'countryConcurrency',
+        'globalConcurrency',
       ].includes(key)
         ? Number(value)
         : value
@@ -140,34 +168,18 @@ function parseArgs() {
   args.output = normalizeMetricsOutput(String(args.output))
   args.pageConcurrency = positiveInteger(args.pageConcurrency, 4)
   args.countryConcurrency = positiveInteger(args.countryConcurrency, 6)
+  args.globalConcurrency = positiveInteger(args.globalConcurrency, 8)
   args.roundId = nonNegativeInteger(args.roundId, 0)
   if (Number(args.roundId) > 0 && Number(args.rounds) !== 1) {
     console.error('--round-id can only be used with --rounds 1')
     usage(1)
   }
 
-  return args as {
-    pages?: string
-    proxies?: string
-    proxySource: string
-    clarketmSource: string
-    clarketmStatusSource: string
-    proxyCountries: string
-    maxProxiesPerCountry: number
-    output: string
-    roundId: number
-    roundReason: string
-    rounds: number
-    interval: number
-    missRecheckDelay: number
-    timeout: number
-    delay: number
-    pageConcurrency: number
-    countryConcurrency: number
-    noDirect: boolean
-    shuffleProxies: boolean
-    userAgent: string
+  const parsed = args as unknown as Omit<CollectorArgs, 'requestLimit'> & {
+    requestLimit?: RequestLimiter
   }
+  parsed.requestLimit = createLimiter(parsed.globalConcurrency)
+  return parsed as CollectorArgs
 }
 
 function positiveInteger(value: unknown, fallback: number) {
@@ -178,6 +190,22 @@ function positiveInteger(value: unknown, fallback: number) {
 function nonNegativeInteger(value: unknown, fallback: number) {
   const number = Math.round(Number(value))
   return Number.isFinite(number) && number >= 0 ? number : fallback
+}
+
+function createLimiter(limit: number): RequestLimiter {
+  let active = 0
+  const queue: Array<() => void> = []
+
+  return async function limitTask<T>(task: () => Promise<T>) {
+    if (active >= limit) await new Promise<void>((done) => queue.push(done))
+    active += 1
+    try {
+      return await task()
+    } finally {
+      active -= 1
+      queue.shift()?.()
+    }
+  }
 }
 
 function usage(code: number): never {
@@ -192,6 +220,7 @@ Options:
   --miss-recheck-delay 0  seconds to wait before rechecking MISS-like samples
   --page-concurrency 4    target pages checked in parallel
   --country-concurrency 6 proxy country groups checked in parallel per page
+  --global-concurrency 8  max active requests across the whole round
   --output storage/cloudflare-cache-metrics.sqlite
   --round-id 123          existing cache_rounds id, for dashboard-managed runs
   --round-reason cli      stored when the script creates its own round
@@ -244,13 +273,16 @@ function normalizeProxy(proxy: string) {
   return value
 }
 
-async function fetchText(url: string, timeout: number) {
+async function fetchText(url: string, timeout: number, maxBytes = 5_000_000) {
   const response = await fetch(url, {
     headers: { 'User-Agent': 'UmmahOneCacheMonitor/1.0 (+https://ummah.one)' },
     signal: AbortSignal.timeout(timeout * 1000),
   })
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
-  return response.text()
+  const text = await response.text()
+  if (Buffer.byteLength(text) > maxBytes)
+    throw new Error(`response too large: ${url}`)
+  return text
 }
 
 function proxyBucket(proxy: string) {
@@ -711,7 +743,9 @@ async function checkProxyGroup(
 
   for (let index = 0; index < group.length; index++) {
     const proxy = group[index]
-    const metrics = await request(url, proxy.url, args.timeout, args.userAgent)
+    const metrics = await args.requestLimit(() =>
+      request(url, proxy.url, args.timeout, args.userAgent),
+    )
     const row = {
       round_id: String(roundId),
       timestamp_utc: new Date().toISOString().replace(/\.\d{3}Z$/, '+00:00'),
@@ -770,6 +804,7 @@ async function main() {
     let recheckCount = 0
     try {
       roundId = await openRound(args, pages, round)
+      const ownsRound = args.roundId <= 0
       const proxies = await loadProxies(args)
       const rows: Metrics[] = []
       const rechecks: RecheckTarget[] = []
@@ -796,11 +831,8 @@ async function main() {
 
         const recheckRows: Metrics[] = []
         for (const target of rechecks) {
-          const metrics = await request(
-            target.url,
-            target.proxy.url,
-            args.timeout,
-            args.userAgent,
+          const metrics = await args.requestLimit(() =>
+            request(target.url, target.proxy.url, args.timeout, args.userAgent),
           )
           const row = {
             round_id: String(roundId),
@@ -827,14 +859,16 @@ async function main() {
         )
       }
 
-      await finalizeMetricRound(args.output, roundId, {
-        status: 'completed',
-        totalRows: rowCount,
-        recheckRows: recheckCount,
-      })
+      if (ownsRound) {
+        await finalizeMetricRound(args.output, roundId, {
+          status: 'completed',
+          totalRows: rowCount,
+          recheckRows: recheckCount,
+        })
+      }
       console.log(`completed database round ${roundId}`)
     } catch (error) {
-      if (roundId) {
+      if (roundId && args.roundId <= 0) {
         await finalizeMetricRound(args.output, roundId, {
           status: 'failed',
           totalRows: rowCount,

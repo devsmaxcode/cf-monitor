@@ -94,6 +94,7 @@ export type MetricColumnSummary = {
 
 export type MetricRowsPageInput = MetricDateRange & {
   filters?: MetricRowFilters
+  maxColumns?: number
   page?: number
   pageSize?: number
 }
@@ -161,11 +162,11 @@ export async function appendMetricRows(
     try {
       const stmt = db.prepare(`
         INSERT INTO cache_metrics (
-          round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+          round_id, timestamp_utc, timestamp_ms, round, page, url, proxy, proxy_country, status_code,
           cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
           content_length, content_type, cache_control, server, error
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
 
       try {
@@ -173,6 +174,7 @@ export async function appendMetricRows(
           stmt.run([
             metricRoundId(row),
             value(row.timestamp_utc),
+            timestampMs(row.timestamp_utc),
             value(row.round),
             value(row.page),
             value(row.url),
@@ -209,14 +211,10 @@ export async function readMetricRows(
 ) {
   return withMetricsDb(output, baseDir, false, ({ db }) => {
     const range = normalizeMetricDateRange(dateRange)
+    const filtered = metricQueryWhere(range)
     const order = dateRange.order === 'desc' ? 'DESC' : 'ASC'
     const limit = boundedInteger(dateRange.limit, 0, 100000, 0)
-    const params: unknown[] = [
-      range.sinceIso,
-      range.sinceIso,
-      range.untilIso,
-      range.untilIso,
-    ]
+    const params: unknown[] = [...filtered.params]
     const limitSql = limit ? 'LIMIT ?' : ''
     if (limit) params.push(limit)
     const rows = selectRows(
@@ -227,10 +225,7 @@ export async function readMetricRows(
           cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
           content_length, content_type, cache_control, server, error
         FROM cache_metrics
-        WHERE
-          deleted_at = ''
-          AND (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)))
-          AND (? IS NULL OR (timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)))
+        ${filtered.where}
         ORDER BY id ${order}
         ${limitSql}
       `,
@@ -248,6 +243,7 @@ export async function readMetricRowsPage(
 ) {
   return withMetricsDb(output, baseDir, false, ({ db }) => {
     const range = normalizeMetricDateRange(input)
+    const maxColumns = boundedInteger(input.maxColumns, 1, 200, 80)
     const pageSize = boundedInteger(input.pageSize, 1, 200, 50)
     const page = boundedInteger(input.page, 1, 1000000, 1)
     const offset = (page - 1) * pageSize
@@ -284,48 +280,55 @@ export async function readMetricRowsPage(
       [...filtered.params, pageSize, offset],
     )
     const groupFilter = metricGroupWhere(groupRows)
-    const pageFilter = metricQueryWhere(
-      range,
-      input.filters,
-      [groupFilter.sql],
-      groupFilter.params,
-    )
-    const rows = groupRows.length
-      ? selectRows(
-          db,
-          `
-            SELECT
-              id, round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
-              cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
-              content_length, content_type, cache_control, server, error
-            FROM cache_metrics
-            ${pageFilter.where}
-            ORDER BY id ASC
-          `,
-          pageFilter.params,
-        ).map(metricRowFromDb)
-      : []
     const columns = selectRows(
       db,
       `
-        SELECT
-          CAST(round_id AS TEXT) AS round_id,
-          round,
-          MIN(timestamp_utc) AS started_at,
-          MAX(timestamp_utc) AS completed_at,
-          MIN(id) AS first_id
-        FROM cache_metrics
-        ${filtered.where}
-        GROUP BY COALESCE(NULLIF(round, ''), CAST(round_id AS TEXT), '')
+        SELECT *
+        FROM (
+          SELECT
+            CAST(round_id AS TEXT) AS round_id,
+            round,
+            MIN(timestamp_utc) AS started_at,
+            MAX(timestamp_utc) AS completed_at,
+            MIN(id) AS first_id
+          FROM cache_metrics
+          ${filtered.where}
+          GROUP BY COALESCE(NULLIF(round, ''), CAST(round_id AS TEXT), '')
+          ORDER BY first_id DESC
+          LIMIT ?
+        )
         ORDER BY first_id ASC
       `,
-      filtered.params,
+      [...filtered.params, maxColumns],
     ).map((row) => ({
       completed_at: value(row.completed_at),
       round: value(row.round),
       round_id: value(row.round_id),
       started_at: value(row.started_at),
     }))
+    const columnFilter = metricColumnWhere(columns)
+    const pageFilter = metricQueryWhere(
+      range,
+      input.filters,
+      [groupFilter.sql, columnFilter.sql],
+      [...groupFilter.params, ...columnFilter.params],
+    )
+    const rows =
+      groupRows.length && columns.length
+        ? selectRows(
+            db,
+            `
+              SELECT
+                id, round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+                cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
+                content_length, content_type, cache_control, server, error
+              FROM cache_metrics
+              ${pageFilter.where}
+              ORDER BY id ASC
+            `,
+            pageFilter.params,
+          ).map(metricRowFromDb)
+        : []
     const boundsFilter = metricQueryWhere(range, undefined, [
       "timestamp_utc <> ''",
     ])
@@ -554,6 +557,9 @@ export async function softDeleteMetricData(
     db.run("UPDATE cache_rounds SET deleted_at = ? WHERE deleted_at = ''", [
       deletedAt,
     ])
+    db.run('DELETE FROM cache_metrics')
+    db.run('DELETE FROM cache_rounds')
+    db.run('VACUUM')
 
     return {
       deletedMetrics: integer(metricCount.count),
@@ -714,6 +720,7 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       round_id INTEGER NOT NULL DEFAULT 0,
       timestamp_utc TEXT NOT NULL DEFAULT '',
+      timestamp_ms INTEGER NOT NULL DEFAULT 0,
       round TEXT NOT NULL DEFAULT '',
       page TEXT NOT NULL DEFAULT '',
       url TEXT NOT NULL DEFAULT '',
@@ -735,9 +742,18 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
     )
   `)
   addRoundIdColumnIfMissing(db)
+  addColumnIfMissing(
+    db,
+    'cache_metrics',
+    'timestamp_ms',
+    'INTEGER NOT NULL DEFAULT 0',
+  )
   addDeletedAtColumnIfMissing(db, 'cache_rounds')
   addDeletedAtColumnIfMissing(db, 'cache_metrics')
   backfillLegacyRound(db)
+  db.run(
+    "UPDATE cache_metrics SET timestamp_ms = CAST(strftime('%s', timestamp_utc) AS INTEGER) * 1000 WHERE timestamp_ms = 0 AND timestamp_utc <> ''",
+  )
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_cache_rounds_status ON cache_rounds (status)',
   )
@@ -751,6 +767,9 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
     'CREATE INDEX IF NOT EXISTS idx_cache_metrics_timestamp ON cache_metrics (timestamp_utc)',
   )
   db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_timestamp_ms ON cache_metrics (timestamp_ms)',
+  )
+  db.run(
     'CREATE INDEX IF NOT EXISTS idx_cache_metrics_page_country ON cache_metrics (page, proxy_country)',
   )
   db.run(
@@ -758,6 +777,15 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
   )
   db.run(
     'CREATE INDEX IF NOT EXISTS idx_cache_metrics_deleted_at ON cache_metrics (deleted_at)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_active_time_id ON cache_metrics (deleted_at, timestamp_ms, id)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_active_group ON cache_metrics (deleted_at, page, url, proxy_country, id)',
+  )
+  db.run(
+    'CREATE INDEX IF NOT EXISTS idx_cache_metrics_active_status_time ON cache_metrics (deleted_at, cf_cache_status, timestamp_ms)',
   )
 }
 
@@ -827,9 +855,18 @@ function addDeletedAtColumnIfMissing(
   db: SqlJsDatabase,
   table: 'cache_metrics' | 'cache_rounds',
 ) {
+  addColumnIfMissing(db, table, 'deleted_at', "TEXT NOT NULL DEFAULT ''")
+}
+
+function addColumnIfMissing(
+  db: SqlJsDatabase,
+  table: 'cache_metrics' | 'cache_rounds',
+  column: string,
+  definition: string,
+) {
   const columns = selectRows(db, `PRAGMA table_info(${table})`)
-  if (columns.some((column) => value(column.name) === 'deleted_at')) return
-  db.run(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''`)
+  if (columns.some((row) => value(row.name) === column)) return
+  db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
 }
 
 function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
@@ -870,10 +907,10 @@ function pruneOldMetricRounds(db: SqlJsDatabase, keepDays: number) {
   db.run(
     `
       DELETE FROM cache_metrics
-      WHERE timestamp_utc <> ''
-        AND datetime(timestamp_utc) < datetime(?)
+      WHERE timestamp_ms > 0
+        AND timestamp_ms < ?
     `,
-    [cutoffIso],
+    [timestampMs(cutoffIso)],
   )
   db.run(
     `
@@ -920,16 +957,12 @@ function metricQueryWhere(
   clauses.push("deleted_at = ''")
 
   if (range.sinceIso) {
-    clauses.push(
-      "timestamp_utc <> '' AND datetime(timestamp_utc) >= datetime(?)",
-    )
-    params.push(range.sinceIso)
+    clauses.push('timestamp_ms >= ?')
+    params.push(timestampMs(range.sinceIso))
   }
   if (range.untilIso) {
-    clauses.push(
-      "timestamp_utc <> '' AND datetime(timestamp_utc) <= datetime(?)",
-    )
-    params.push(range.untilIso)
+    clauses.push('timestamp_ms <= ?')
+    params.push(timestampMs(range.untilIso))
   }
 
   const country = value(filters.country).trim()
@@ -981,6 +1014,21 @@ function metricGroupWhere(rows: Record<string, unknown>[]) {
   return {
     params,
     sql: clauses.length ? `(${clauses.join(' OR ')})` : '0',
+  }
+}
+
+function metricColumnWhere(columns: MetricColumnSummary[]) {
+  const keys = columns
+    .map((column) => value(column.round) || value(column.round_id))
+    .filter(Boolean)
+
+  return {
+    params: keys,
+    sql: keys.length
+      ? `COALESCE(NULLIF(round, ''), CAST(round_id AS TEXT), '') IN (${keys
+          .map(() => '?')
+          .join(', ')})`
+      : '0',
   }
 }
 
@@ -1060,6 +1108,11 @@ function metricRoundStatus(input: unknown): MetricRoundStatus {
 
 function metricRoundId(row: MetricRow) {
   return integer(row.round_id)
+}
+
+function timestampMs(input: unknown) {
+  const time = Date.parse(value(input))
+  return Number.isNaN(time) ? 0 : time
 }
 
 function normalizeMetricDateRange(range: MetricDateRange) {

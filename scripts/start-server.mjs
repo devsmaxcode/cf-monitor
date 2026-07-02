@@ -44,6 +44,8 @@ async function serveStatic(request) {
   const headers = new Headers()
   if (pathname.startsWith('/assets/')) {
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+  } else if (/\.(png|ico|webmanifest|json|txt)$/.test(pathname)) {
+    headers.set('Cache-Control', 'public, max-age=3600')
   }
 
   return new Response(request.method === 'HEAD' ? null : Bun.file(filePath), {

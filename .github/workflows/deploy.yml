@@ -27,6 +27,12 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Cache Bun Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
       - name: Install Dependencies
         run: bun install --frozen-lockfile
 
@@ -204,8 +210,7 @@ jobs:
           export NODE_ENV=production
           export PORT="$APP_PORT"
           export PM2_APP_NAME
-          pm2 delete "$PM2_APP_NAME" >/dev/null 2>&1 || true
-          pm2 start ecosystem.config.cjs --update-env
+          pm2 reload ecosystem.config.cjs --only "$PM2_APP_NAME" --update-env || pm2 start ecosystem.config.cjs --update-env
 
           pm2 describe "$PM2_APP_NAME" >/dev/null
 

@@ -11,7 +11,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
   const updateNumber = (
     key:
       | 'delay'
+      | 'globalConcurrency'
       | 'maxProxiesPerCountry'
+      | 'retentionDays'
       | 'roundIntervalSeconds'
       | 'timeout',
     value: string,
@@ -177,6 +179,30 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     value={props.draft.delay}
                     onChange={(event) =>
                       updateNumber('delay', event.target.value)
+                    }
+                  />
+                </label>
+                <label>
+                  Max Requests <small>active</small>
+                  <input
+                    max={64}
+                    min={1}
+                    type="number"
+                    value={props.draft.globalConcurrency}
+                    onChange={(event) =>
+                      updateNumber('globalConcurrency', event.target.value)
+                    }
+                  />
+                </label>
+                <label>
+                  Keep Data <small>days</small>
+                  <input
+                    max={3650}
+                    min={1}
+                    type="number"
+                    value={props.draft.retentionDays}
+                    onChange={(event) =>
+                      updateNumber('retentionDays', event.target.value)
                     }
                   />
                 </label>

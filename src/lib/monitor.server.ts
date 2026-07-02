@@ -7,6 +7,7 @@ import {
   DEFAULT_METRICS_DB,
   finalizeMetricRound,
   normalizeMetricsOutput,
+  applyMetricRoundRetention,
   readAppSetting,
   resolveMetricsDbPath,
   readMetricRuntimeSummary,
@@ -52,6 +53,8 @@ export type Config = {
   noClarketmSource: boolean
   shuffleProxies: boolean
   userAgent: string
+  retentionDays: number
+  globalConcurrency: number
 }
 
 export type MetricTimeColumn = {
@@ -146,6 +149,8 @@ const defaultConfig: Config = {
   noClarketmSource: false,
   shuffleProxies: true,
   userAgent: 'UmmahOneCacheMonitor/1.0 (+https://ummah.one)',
+  retentionDays: 90,
+  globalConcurrency: 8,
 }
 
 const state: MonitorState = {
@@ -177,6 +182,8 @@ let scheduledJob: ReturnType<typeof setTimeout> | null = null
 let activeMonitorProcess: ChildProcessWithoutNullStreams | null = null
 let stopRequested = false
 let requestedCrawlPages = new Set<string>()
+let cachedConfig: Config | null = null
+let cachedProxyText: string | null = null
 
 async function exists(path: string) {
   try {
@@ -238,6 +245,8 @@ function normalizeStoredMonitorState(value: unknown): StoredMonitorState {
 }
 
 export async function readConfig(): Promise<Config> {
+  if (cachedConfig) return cachedConfig
+
   const stored = await readAppSetting(
     dashboardConfigSetting,
     appSettingsDbOutput,
@@ -245,7 +254,7 @@ export async function readConfig(): Promise<Config> {
   )
   if (stored !== null) {
     try {
-      return sanitizeStoredConfig(stored)
+      return (cachedConfig = sanitizeStoredConfig(stored))
     } catch (error) {
       pushLog(`stored config read failed: ${errorMessage(error)}`)
     }
@@ -254,11 +263,11 @@ export async function readConfig(): Promise<Config> {
   const legacy = await readLegacyConfig()
   if (legacy) {
     await writeStoredConfig(legacy)
-    return legacy
+    return (cachedConfig = legacy)
   }
 
   await writeStoredConfig(defaultConfig)
-  return defaultConfig
+  return (cachedConfig = defaultConfig)
 }
 
 async function readLegacyConfig() {
@@ -287,6 +296,7 @@ async function writeStoredConfig(config: Config) {
     appSettingsDbOutput,
     root,
   )
+  cachedConfig = sanitized
   return sanitized
 }
 
@@ -332,6 +342,8 @@ export function sanitizeConfig(
     noProxySource: Boolean(value.noProxySource),
     noClarketmSource: Boolean(value.noClarketmSource),
     shuffleProxies: Boolean(value.shuffleProxies),
+    retentionDays: clamp(Number(value.retentionDays), 1, 3650, 90),
+    globalConcurrency: clamp(Number(value.globalConcurrency), 1, 64, 8),
   }
 }
 
@@ -360,6 +372,7 @@ export async function saveProxies(text: string) {
   await mkdir(storageDir, { recursive: true })
   await writeAppSetting(proxyListSetting, text, appSettingsDbOutput, root)
   await writeFile(proxiesPath, text, 'utf8')
+  cachedProxyText = text
   return { ok: true }
 }
 
@@ -492,17 +505,19 @@ async function ensureRunFiles(config: Config) {
 }
 
 async function readProxyText() {
+  if (cachedProxyText !== null) return cachedProxyText
+
   const stored = await readAppSetting(
     proxyListSetting,
     appSettingsDbOutput,
     root,
   )
-  if (stored !== null) return stored
+  if (stored !== null) return (cachedProxyText = stored)
 
   if (!(await exists(proxiesPath))) return ''
   const legacy = await readFile(proxiesPath, 'utf8')
   await writeAppSetting(proxyListSetting, legacy, appSettingsDbOutput, root)
-  return legacy
+  return (cachedProxyText = legacy)
 }
 
 function pushLog(line: string) {
@@ -734,6 +749,7 @@ async function runMonitorRound(reason: string) {
         { status: 'completed' },
         root,
       )
+      await applyMetricRoundRetention(config.output, config.retentionDays, root)
       pushLog(`[${appDateTimeLabel(new Date())}] round ${roundId} finished`)
     }
   } catch (error) {
@@ -804,6 +820,8 @@ function monitorArgs(config: Config, roundId: number, reason: string) {
     config.proxyCountries,
     '--max-proxies-per-country',
     String(config.maxProxiesPerCountry),
+    '--global-concurrency',
+    String(config.globalConcurrency),
     '--user-agent',
     config.userAgent,
   ]

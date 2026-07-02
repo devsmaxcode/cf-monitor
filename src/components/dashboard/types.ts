@@ -39,9 +39,11 @@ export type UsedProxyRow = {
 
 type ConfigNumberKey =
   | 'delay'
+  | 'globalConcurrency'
   | 'hitIntervalSeconds'
   | 'maxProxiesPerCountry'
   | 'missIntervalSeconds'
+  | 'retentionDays'
   | 'roundIntervalSeconds'
   | 'timeout'
 

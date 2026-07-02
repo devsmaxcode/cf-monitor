@@ -41,6 +41,7 @@ const metricRowsPageSchema = daysSchema.extend({
   filters: metricFiltersSchema.optional(),
   page: z.number().int().min(1).optional(),
   pageSize: z.number().int().min(1).max(200).optional(),
+  maxColumns: z.number().int().min(1).max(200).optional(),
 })
 
 const proxyTextSchema = z.object({ text: z.string() })
@@ -61,6 +62,8 @@ const configSchema: z.ZodType<Config> = z
     noClarketmSource: z.boolean(),
     shuffleProxies: z.boolean(),
     userAgent: z.string(),
+    retentionDays: z.number(),
+    globalConcurrency: z.number(),
   })
   .passthrough()
 

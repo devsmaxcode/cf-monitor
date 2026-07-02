@@ -19,6 +19,7 @@ export function useMetricsConsumer() {
   const { metrics, rangeDays } = useDashboardData()
   const { setRangeDays } = useDashboardActions()
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [country, setCountry] = useState('')
   const [pageFilter, setPageFilter] = useState('')
   const [cacheStatus, setCacheStatus] = useState('')
@@ -60,10 +61,15 @@ export function useMetricsConsumer() {
         cacheStatus,
         country,
         page: pageFilter,
-        query,
+        query: debouncedQuery,
       }) satisfies MetricFilters,
-    [cacheStatus, country, pageFilter, query],
+    [cacheStatus, country, debouncedQuery, pageFilter],
   )
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 300)
+    return () => window.clearTimeout(timer)
+  }, [query])
 
   useEffect(() => {
     let active = true
@@ -75,6 +81,7 @@ export function useMetricsConsumer() {
       data: {
         days: rangeDays,
         filters,
+        maxColumns: 80,
         page: pageIndex,
         pageSize,
       },
@@ -229,9 +236,11 @@ function configToDraft(config: Config): ConfigDraft {
   return {
     ...config,
     delay: String(config.delay),
+    globalConcurrency: String(config.globalConcurrency),
     hitIntervalSeconds: String(config.hitIntervalSeconds),
     maxProxiesPerCountry: String(config.maxProxiesPerCountry),
     missIntervalSeconds: String(config.missIntervalSeconds),
+    retentionDays: String(config.retentionDays),
     roundIntervalSeconds: String(config.roundIntervalSeconds),
     timeout: String(config.timeout),
   }
@@ -241,9 +250,11 @@ function draftToConfig(draft: ConfigDraft): Config {
   return {
     ...draft,
     delay: Number(draft.delay),
+    globalConcurrency: Number(draft.globalConcurrency),
     hitIntervalSeconds: Number(draft.hitIntervalSeconds),
     maxProxiesPerCountry: Number(draft.maxProxiesPerCountry),
     missIntervalSeconds: Number(draft.missIntervalSeconds),
+    retentionDays: Number(draft.retentionDays),
     roundIntervalSeconds: Number(draft.roundIntervalSeconds),
     timeout: Number(draft.timeout),
   }
