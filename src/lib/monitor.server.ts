@@ -9,6 +9,7 @@ import {
   normalizeMetricsOutput,
   readAppSetting,
   resolveMetricsDbPath,
+  readMetricRuntimeSummary,
   readMetricRowsPage,
   readMetricRows,
   readMetricRounds,
@@ -29,6 +30,7 @@ import type {
   MetricRowFilters,
   MetricRow,
   MetricRoundRow,
+  MetricRuntimeSummary,
 } from './metrics-db'
 import { defaultMetricRangeDays } from './metric-range'
 import type { MetricRangeDays } from './metric-range'
@@ -81,6 +83,9 @@ export type CrawlProgress = {
 }
 
 export type MetricsPayload = Awaited<ReturnType<typeof buildMetrics>>
+export type RuntimeMetricsPayload = Awaited<
+  ReturnType<typeof buildRuntimeMetrics>
+>
 export type MetricsPagePayload = Awaited<ReturnType<typeof getMetricRowsPage>>
 
 export type DashboardPayload = {
@@ -377,10 +382,15 @@ export async function getDashboard(
 
 export async function getRuntime(days: MetricRangeDays) {
   const config = await readConfig()
-  const metrics = await buildMetrics(config, metricRange(days))
+  const range = metricRange(days)
+  const [runtimeSummary, rounds] = await Promise.all([
+    readMetricRuntimeSummary(config.output, root, { sinceIso: range.sinceIso }),
+    readMetricRounds(config.output, root, { sinceIso: range.sinceIso }),
+  ])
+  const metrics = buildRuntimeMetrics(config, runtimeSummary, rounds)
   return {
     metrics,
-    status: await snapshotState(config, metrics.rounds),
+    status: await snapshotState(config, rounds),
   }
 }
 
@@ -953,22 +963,30 @@ async function buildMetrics(
     cells: countries.map((country) => latest.get(`${page}|${country}`) || null),
   }))
 
+  const lastMetricRow = rows.at(-1)
+  const lastTimestamp = lastMetricRow?.timestamp_utc || null
   const summary = {
-    totalRounds: rounds.length,
-    totalRows: rows.length,
+    avgResponseMs: average(
+      latestRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
+    ),
+    countryCount: countries.length,
+    lastTimestamp,
     latestCells: latestRows.length,
+    latestErrors: latestRows.filter((row) => row.error).length,
     latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT')
       .length,
     latestMissLike: latestRows.filter(isMissLike).length,
-    latestErrors: latestRows.filter((row) => row.error).length,
     maxAge: Math.max(
       0,
       ...latestRows.map((row) => Number(row.age_seconds) || 0),
     ),
-    avgResponseMs: average(
-      latestRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
+    metricVersion: metricVersionKey(
+      lastMetricRow?.id,
+      rows.length,
+      lastTimestamp,
     ),
-    lastTimestamp: rows.at(-1)?.timestamp_utc || null,
+    totalRounds: rounds.length,
+    totalRows: rows.length,
   }
 
   return {
@@ -991,6 +1009,51 @@ async function buildMetrics(
         rounds[0]?.started_at ||
         null,
     },
+  }
+}
+
+function buildRuntimeMetrics(
+  config: Config,
+  runtimeSummary: MetricRuntimeSummary,
+  rounds: MetricRoundRow[],
+) {
+  return {
+    lastMetricTimestamp: runtimeSummary.lastTimestamp,
+    metricVersion: runtimeSummary.metricVersion,
+    rounds: rounds.map(compactMetricRound),
+    summary: {
+      avgResponseMs: runtimeSummary.avgResponseMs,
+      countryCount: Math.max(
+        runtimeSummary.countryCount,
+        configuredProxyLocationCount(config),
+      ),
+      latestCells: runtimeSummary.latestCells,
+      latestErrors: runtimeSummary.latestErrors,
+      latestHits: runtimeSummary.latestHits,
+      latestMissLike: runtimeSummary.latestMissLike,
+      maxAge: runtimeSummary.maxAge,
+      totalRounds: rounds.length,
+      totalRows: runtimeSummary.totalRows,
+    },
+  }
+}
+
+type CompactMetricRound = Omit<MetricRoundRow, 'config_json'>
+
+function compactMetricRound(round: MetricRoundRow): CompactMetricRound {
+  return {
+    completed_at: round.completed_at,
+    created_at: round.created_at,
+    duration_ms: round.duration_ms,
+    error: round.error,
+    id: round.id,
+    page_count: round.page_count,
+    proxy_country_count: round.proxy_country_count,
+    reason: round.reason,
+    recheck_rows: round.recheck_rows,
+    started_at: round.started_at,
+    status: round.status,
+    total_rows: round.total_rows,
   }
 }
 
@@ -1128,6 +1191,14 @@ function average(values: number[]) {
   return Math.round(
     values.reduce((sum, value) => sum + value, 0) / values.length,
   )
+}
+
+function metricVersionKey(
+  lastMetricId: string | number | undefined,
+  totalRows: number,
+  lastTimestamp: string | null,
+) {
+  return [lastMetricId || 0, totalRows, lastTimestamp || ''].join(':')
 }
 
 function errorMessage(error: unknown) {

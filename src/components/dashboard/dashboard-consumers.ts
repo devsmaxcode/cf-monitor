@@ -7,7 +7,7 @@ import {
 } from '#/lib/monitor.functions'
 import { unique, usedProxyRows } from './helpers'
 import { useDashboardActions, useDashboardData } from './dashboard-context'
-import type { MetricFilters } from './types'
+import type { ConfigDraft, MetricFilters } from './types'
 
 export function useDashboardChrome() {
   const { config, metrics, status } = useDashboardData()
@@ -69,6 +69,7 @@ export function useMetricsConsumer() {
     let active = true
     setLoading(true)
     setPageError('')
+    setPagedMetrics(null)
 
     void getMetricRowsPageFn({
       data: {
@@ -94,7 +95,7 @@ export function useMetricsConsumer() {
     }
   }, [
     filters,
-    metrics.summary.lastTimestamp,
+    metrics.summary.metricVersion,
     pageIndex,
     pageSize,
     rangeDays,
@@ -198,17 +199,17 @@ export function useRoundsConsumer() {
 export function useConfigConsumer() {
   const { config } = useDashboardData()
   const { saveConfigDraft, saving, setDirtyPanel } = useDashboardActions()
-  const [draft, setDraft] = useState<Config>(config)
+  const [draft, setDraft] = useState<ConfigDraft>(() => configToDraft(config))
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
     if (dirty) return
-    setDraft(config)
+    setDraft(configToDraft(config))
   }, [config, dirty])
 
   useEffect(() => () => setDirtyPanel(null), [setDirtyPanel])
 
-  const onChange = (next: Config) => {
+  const onChange = (next: ConfigDraft) => {
     setDraft(next)
     setDirty(true)
     setDirtyPanel('config')
@@ -216,12 +217,36 @@ export function useConfigConsumer() {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    void saveConfigDraft(draft)
+    void saveConfigDraft(draftToConfig(draft))
       .then(() => setDirty(false))
       .catch(() => undefined)
   }
 
   return { draft, onChange, onSubmit, saving }
+}
+
+function configToDraft(config: Config): ConfigDraft {
+  return {
+    ...config,
+    delay: String(config.delay),
+    hitIntervalSeconds: String(config.hitIntervalSeconds),
+    maxProxiesPerCountry: String(config.maxProxiesPerCountry),
+    missIntervalSeconds: String(config.missIntervalSeconds),
+    roundIntervalSeconds: String(config.roundIntervalSeconds),
+    timeout: String(config.timeout),
+  }
+}
+
+function draftToConfig(draft: ConfigDraft): Config {
+  return {
+    ...draft,
+    delay: Number(draft.delay),
+    hitIntervalSeconds: Number(draft.hitIntervalSeconds),
+    maxProxiesPerCountry: Number(draft.maxProxiesPerCountry),
+    missIntervalSeconds: Number(draft.missIntervalSeconds),
+    roundIntervalSeconds: Number(draft.roundIntervalSeconds),
+    timeout: Number(draft.timeout),
+  }
 }
 
 export function useProxiesConsumer() {

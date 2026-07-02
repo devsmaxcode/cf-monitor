@@ -9,6 +9,8 @@ import {
 } from '#/lib/timezone'
 import type { MetricFilters, MetricRow, UsedProxyRow } from './types'
 
+export { isMetricRangeDays, parseMetricRangeDays } from '#/lib/metric-range'
+
 export const rangeOptions = metricRangeDayOptions
 export const dayMs = 24 * 60 * 60 * 1000
 export const matrixUrlColWidth = 260
@@ -292,15 +294,6 @@ export function isMissLike(status: string) {
     'STALE',
     'UPDATING',
   ].includes(status)
-}
-
-export function isMetricRangeDays(value: unknown): value is MetricRangeDays {
-  return metricRangeDayOptions.includes(value as MetricRangeDays)
-}
-
-export function parseMetricRangeDays(value: string): MetricRangeDays {
-  const range = value === 'all' ? value : Number(value)
-  return isMetricRangeDays(range) ? range : 'all'
 }
 
 export function metricRangeLabel(days: MetricRangeDays) {

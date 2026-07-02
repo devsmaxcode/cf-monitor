@@ -37,9 +37,21 @@ export type UsedProxyRow = {
   timestamp: string
 }
 
+type ConfigNumberKey =
+  | 'delay'
+  | 'hitIntervalSeconds'
+  | 'maxProxiesPerCountry'
+  | 'missIntervalSeconds'
+  | 'roundIntervalSeconds'
+  | 'timeout'
+
+export type ConfigDraft = Omit<Config, ConfigNumberKey> & {
+  [key in ConfigNumberKey]: string
+}
+
 export type ConfigPanelProps = {
-  draft: Config
-  onChange: (draft: Config) => void
+  draft: ConfigDraft
+  onChange: (draft: ConfigDraft) => void
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void
   saving: boolean
 }

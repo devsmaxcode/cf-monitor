@@ -1,13 +1,25 @@
 import { Outlet } from '@tanstack/react-router'
-import type { DashboardPayload } from '#/lib/monitor.server'
+import type { DashboardPayload, MetricRangeDays } from '#/lib/monitor.server'
 import { DashboardHeader } from './dashboard-header'
 import { DashboardNav } from './dashboard-nav'
 import { DashboardProvider } from './dashboard-context'
 import { useDashboardChrome } from './dashboard-consumers'
 
-export function DashboardShell({ initial }: { initial: DashboardPayload }) {
+export function DashboardShell({
+  initial,
+  rangeDays,
+  setRangeDays,
+}: {
+  initial: DashboardPayload
+  rangeDays: MetricRangeDays
+  setRangeDays: (value: MetricRangeDays) => void
+}) {
   return (
-    <DashboardProvider initial={initial}>
+    <DashboardProvider
+      initial={initial}
+      rangeDays={rangeDays}
+      setRangeDays={setRangeDays}
+    >
       <DashboardFrame />
     </DashboardProvider>
   )

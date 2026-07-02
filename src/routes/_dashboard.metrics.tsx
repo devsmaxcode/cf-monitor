@@ -7,34 +7,6 @@ export const Route = createFileRoute('/_dashboard/metrics')({
 })
 
 function MetricsRoute() {
-  const dashboard = useMetricsConsumer()
-  return (
-    <MetricsPanel
-      cacheStatus={dashboard.cacheStatus}
-      columns={dashboard.columns}
-      countries={dashboard.countries}
-      country={dashboard.country}
-      deletingMetrics={dashboard.deletingMetrics}
-      error={dashboard.error}
-      loading={dashboard.loading}
-      onDeleteMetricData={dashboard.onDeleteMetricData}
-      page={dashboard.page}
-      pageIndex={dashboard.pageIndex}
-      pages={dashboard.pages}
-      pageSize={dashboard.pageSize}
-      query={dashboard.query}
-      rangeDays={dashboard.rangeDays}
-      rows={dashboard.filteredRows}
-      setCacheStatus={dashboard.setCacheStatus}
-      setCountry={dashboard.setCountry}
-      setPage={dashboard.setPage}
-      setPageIndex={dashboard.setPageIndex}
-      setPageSize={dashboard.setPageSize}
-      setQuery={dashboard.setQuery}
-      setRangeDays={dashboard.setRangeDays}
-      statuses={dashboard.statuses}
-      totalGroups={dashboard.totalGroups}
-      totalRows={dashboard.totalRows}
-    />
-  )
+  const { filteredRows: rows, ...dashboard } = useMetricsConsumer()
+  return <MetricsPanel {...dashboard} rows={rows} />
 }

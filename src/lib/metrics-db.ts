@@ -112,6 +112,19 @@ export type MetricRowsPage = {
   totalRows: number
 }
 
+export type MetricRuntimeSummary = {
+  avgResponseMs: number
+  countryCount: number
+  latestCells: number
+  latestErrors: number
+  latestHits: number
+  latestMissLike: number
+  lastTimestamp: string | null
+  maxAge: number
+  metricVersion: string
+  totalRows: number
+}
+
 export type AppSettingKey = 'dashboard-config' | 'proxy-list'
 
 type DbHandle = {
@@ -339,6 +352,72 @@ export async function readMetricRowsPage(
       totalGroups: integer(groupCountRow.count),
       totalRows: integer(totalRow.count),
     } satisfies MetricRowsPage
+  })
+}
+
+export async function readMetricRuntimeSummary(
+  output: string,
+  baseDir = process.cwd(),
+  dateRange: MetricDateRange = {},
+) {
+  return withMetricsDb(output, baseDir, false, ({ db }) => {
+    const range = normalizeMetricDateRange(dateRange)
+    const filtered = metricQueryWhere(range)
+    const [totalRow] = selectRows(
+      db,
+      `
+        SELECT COUNT(*) AS total_rows, MAX(id) AS max_id
+        FROM cache_metrics
+        ${filtered.where}
+      `,
+      filtered.params,
+    )
+    const totalRows = integer(totalRow.total_rows)
+    const maxId = integer(totalRow.max_id)
+    const lastTimestamp = maxId
+      ? value(
+          selectRows(
+            db,
+            'SELECT timestamp_utc FROM cache_metrics WHERE id = ? LIMIT 1',
+            [maxId],
+          ).at(0)?.timestamp_utc,
+        ) || null
+      : null
+    const [latestRow] = selectRows(
+      db,
+      `
+        WITH latest_ids AS (
+          SELECT MAX(id) AS id
+          FROM cache_metrics
+          ${filtered.where}
+          GROUP BY page, proxy_country
+        )
+        SELECT
+          COUNT(*) AS latest_cells,
+          SUM(CASE WHEN UPPER(cf_cache_status) = 'HIT' THEN 1 ELSE 0 END) AS latest_hits,
+          SUM(CASE WHEN UPPER(cf_cache_status) IN ('MISS', 'BYPASS', 'DYNAMIC', 'EXPIRED', 'REVALIDATED', 'STALE', 'UPDATING') THEN 1 ELSE 0 END) AS latest_miss_like,
+          SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS latest_errors,
+          MAX(CAST(age_seconds AS INTEGER)) AS max_age,
+          AVG(CAST(response_ms AS INTEGER)) AS avg_response_ms,
+          COUNT(DISTINCT NULLIF(proxy_country, '')) AS country_count
+        FROM cache_metrics
+        INNER JOIN latest_ids ON latest_ids.id = cache_metrics.id
+      `,
+      filtered.params,
+    )
+
+    return {
+      avgResponseMs: Math.round(Number(latestRow.avg_response_ms) || 0),
+      countryCount: integer(latestRow.country_count),
+      latestCells: integer(latestRow.latest_cells),
+      latestErrors: integer(latestRow.latest_errors),
+      latestHits: integer(latestRow.latest_hits),
+      latestMissLike: integer(latestRow.latest_miss_like),
+      lastTimestamp,
+      maxAge: integer(latestRow.max_age),
+      metricVersion: metricVersionKey(maxId, totalRows, lastTimestamp),
+      totalRows,
+    } satisfies MetricRuntimeSummary
   })
 }
 
@@ -1010,6 +1089,14 @@ function boundedInteger(
 ) {
   const number = integer(input, fallback)
   return Math.min(max, Math.max(min, number))
+}
+
+function metricVersionKey(
+  maxId: number,
+  totalRows: number,
+  lastTimestamp: string | null,
+) {
+  return [maxId, totalRows, lastTimestamp || ''].join(':')
 }
 
 function nowIso() {

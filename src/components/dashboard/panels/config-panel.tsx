@@ -1,14 +1,26 @@
 import { Link, Save, Settings2, Shuffle, Timer, User } from 'lucide-react'
-import type { Config } from '#/lib/monitor.server'
 import { duration, normalizeList, unique } from '../helpers'
 import { Check } from '../ui'
-import type { ConfigPanelProps } from '../types'
+import type { ConfigDraft, ConfigPanelProps } from '../types'
 
 export function ConfigPanel(props: ConfigPanelProps) {
-  const update = <TKey extends keyof Config>(key: TKey, value: Config[TKey]) =>
+  const update = <TKey extends keyof ConfigDraft>(
+    key: TKey,
+    value: ConfigDraft[TKey],
+  ) => props.onChange({ ...props.draft, [key]: value })
+  const updateNumber = (
+    key:
+      | 'delay'
+      | 'maxProxiesPerCountry'
+      | 'roundIntervalSeconds'
+      | 'timeout',
+    value: string,
+  ) =>
     props.onChange({ ...props.draft, [key]: value })
   const summary = configSummary(props.draft)
-  const countries = normalizeList(props.draft.proxyCountries)
+  const countries = props.draft.proxyCountries.includes('\n')
+    ? props.draft.proxyCountries
+    : normalizeList(props.draft.proxyCountries).join('\n')
 
   return (
     <form className="form-panel config-panel" onSubmit={props.onSubmit}>
@@ -68,7 +80,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
                   spellCheck={false}
                   value={props.draft.pages.join('\n')}
                   onChange={(event) =>
-                    update('pages', normalizeList(event.target.value))
+                    update('pages', event.target.value.split(/\r?\n/))
                   }
                 />
               </label>
@@ -91,12 +103,9 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     className="config-textarea-small"
                     rows={6}
                     spellCheck={false}
-                    value={countries.join('\n')}
+                    value={countries}
                     onChange={(event) =>
-                      update(
-                        'proxyCountries',
-                        normalizeList(event.target.value).join(','),
-                      )
+                      update('proxyCountries', event.target.value)
                     }
                   />
                 </label>
@@ -108,7 +117,10 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     type="number"
                     value={props.draft.maxProxiesPerCountry}
                     onChange={(event) =>
-                      update('maxProxiesPerCountry', Number(event.target.value))
+                      updateNumber(
+                        'maxProxiesPerCountry',
+                        event.target.value,
+                      )
                     }
                   />
                 </label>
@@ -137,7 +149,10 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     type="number"
                     value={props.draft.roundIntervalSeconds}
                     onChange={(event) =>
-                      update('roundIntervalSeconds', Number(event.target.value))
+                      updateNumber(
+                        'roundIntervalSeconds',
+                        event.target.value,
+                      )
                     }
                   />
                 </label>
@@ -149,7 +164,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     type="number"
                     value={props.draft.timeout}
                     onChange={(event) =>
-                      update('timeout', Number(event.target.value))
+                      updateNumber('timeout', event.target.value)
                     }
                   />
                 </label>
@@ -161,7 +176,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
                     type="number"
                     value={props.draft.delay}
                     onChange={(event) =>
-                      update('delay', Number(event.target.value))
+                      updateNumber('delay', event.target.value)
                     }
                   />
                 </label>
@@ -220,7 +235,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
   )
 }
 
-function configSummary(config: Config) {
+function configSummary(config: ConfigDraft) {
   const countries = normalizeList(config.proxyCountries)
   const locations = countries.length + (config.noDirect ? 0 : 1)
   const domains = unique(
@@ -242,7 +257,7 @@ function configSummary(config: Config) {
     cells: config.pages.length * locations,
     countries: countries.length,
     domains,
-    intervals: duration(config.roundIntervalSeconds),
+    intervals: duration(Number(config.roundIntervalSeconds)),
     locations,
     sources,
     urls: config.pages.length,

@@ -19,7 +19,7 @@ export function SummaryStats({ metrics }: { metrics: MetricsPayload }) {
       <Stat
         icon={<Globe2 size={18} />}
         label="Locations"
-        value={compact(metrics.countries.length)}
+        value={compact(metrics.summary.countryCount)}
       />
       <Stat
         icon={<Timer size={18} />}

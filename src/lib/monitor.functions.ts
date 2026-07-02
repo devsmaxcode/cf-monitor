@@ -1,6 +1,19 @@
 import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import type { Config } from './monitor.server'
+import {
+  deleteMetricData,
+  getDashboard,
+  getMetricRowsPage,
+  getRuntime,
+  readProxies,
+  runOnce,
+  sanitizeConfig,
+  saveConfig,
+  saveProxies,
+  startMonitor,
+  stopMonitor,
+} from './monitor.server'
 import { metricRangeDayOptions } from './metric-range'
 import type { MetricRangeDays } from './metric-range'
 
@@ -30,6 +43,8 @@ const metricRowsPageSchema = daysSchema.extend({
   pageSize: z.number().int().min(1).max(200).optional(),
 })
 
+const proxyTextSchema = z.object({ text: z.string() })
+
 const configSchema: z.ZodType<Config> = z
   .object({
     pages: z.array(z.string()),
@@ -51,70 +66,40 @@ const configSchema: z.ZodType<Config> = z
 
 export const getDashboardFn = createServerFn({ method: 'GET' })
   .validator((input: unknown) => daysSchema.parse(input))
-  .handler(async ({ data }) => {
-    const { getDashboard } = await import('./monitor.server')
-    return getDashboard(data.days)
-  })
+  .handler(({ data }) => getDashboard(data.days))
 
 export const getRuntimeFn = createServerFn({ method: 'GET' })
   .validator((input: unknown) => daysSchema.parse(input))
-  .handler(async ({ data }) => {
-    const { getRuntime } = await import('./monitor.server')
-    return getRuntime(data.days)
-  })
+  .handler(({ data }) => getRuntime(data.days))
 
 export const getMetricRowsPageFn = createServerFn({ method: 'GET' })
   .validator((input: unknown) => metricRowsPageSchema.parse(input))
-  .handler(async ({ data }) => {
-    const { getMetricRowsPage } = await import('./monitor.server')
-    return getMetricRowsPage(data)
-  })
+  .handler(({ data }) => getMetricRowsPage(data))
 
 export const deleteMetricDataFn = createServerFn({ method: 'POST' }).handler(
-  async () => {
-    const { deleteMetricData } = await import('./monitor.server')
-    return deleteMetricData()
-  },
+  () => deleteMetricData(),
 )
 
 export const saveConfigFn = createServerFn({ method: 'POST' })
   .validator((input: unknown) => configSchema.parse(input))
-  .handler(async ({ data }) => {
-    const { saveConfig, sanitizeConfig } = await import('./monitor.server')
-    return saveConfig(sanitizeConfig(data))
-  })
+  .handler(({ data }) => saveConfig(sanitizeConfig(data)))
 
 export const getProxiesFn = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    const { readProxies } = await import('./monitor.server')
-    return readProxies()
-  },
+  () => readProxies(),
 )
 
 export const saveProxiesFn = createServerFn({ method: 'POST' })
-  .validator((input: unknown) => z.object({ text: z.string() }).parse(input))
-  .handler(async ({ data }) => {
-    const { saveProxies } = await import('./monitor.server')
-    return saveProxies(data.text)
-  })
+  .validator((input: unknown) => proxyTextSchema.parse(input))
+  .handler(({ data }) => saveProxies(data.text))
 
 export const startMonitorFn = createServerFn({ method: 'POST' }).handler(
-  async () => {
-    const { startMonitor } = await import('./monitor.server')
-    return startMonitor()
-  },
+  () => startMonitor(),
 )
 
 export const stopMonitorFn = createServerFn({ method: 'POST' }).handler(
-  async () => {
-    const { stopMonitor } = await import('./monitor.server')
-    return stopMonitor()
-  },
+  () => stopMonitor(),
 )
 
 export const runOnceFn = createServerFn({ method: 'POST' }).handler(
-  async () => {
-    const { runOnce } = await import('./monitor.server')
-    return runOnce()
-  },
+  () => runOnce(),
 )

@@ -5,3 +5,12 @@ Use the latest version of Shadcn to install new components, like this command to
 ```bash
 pnpm dlx shadcn@latest add button
 ```
+
+# TanStack Intent
+
+When working on TanStack or TanStack AI code, follow the matching mappings in `AGENTS.md`.
+Before editing TanStack AI code, load the bundled guidance with:
+
+```bash
+bunx @tanstack/intent@latest load @tanstack/ai#ai-core
+```

@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import type { ReactNode } from 'react'
@@ -20,18 +21,19 @@ import {
 import type {
   Config,
   DashboardPayload,
+  MetricRangeDays,
   MetricsPayload,
   MonitorState,
+  RuntimeMetricsPayload,
 } from '#/lib/monitor.server'
 import { normalizeDraft } from './helpers'
-import { useStoredRange } from './use-stored-range'
 import type { DashboardSection, RuntimeAction } from './types'
 
 type DashboardDataContextValue = {
   config: Config
   metrics: MetricsPayload
   proxyText: string
-  rangeDays: ReturnType<typeof useStoredRange>[0]
+  rangeDays: MetricRangeDays
   status: MonitorState
 }
 
@@ -41,7 +43,7 @@ type DashboardActionsContextValue = {
   saveProxyDraft: (text: string) => Promise<void>
   saving: boolean
   setDirtyPanel: (value: DashboardSection | null) => void
-  setRangeDays: ReturnType<typeof useStoredRange>[1]
+  setRangeDays: (value: MetricRangeDays) => void
   triggerAction: (kind: RuntimeAction) => Promise<void>
 }
 
@@ -54,11 +56,14 @@ const DashboardActionsContext =
 export function DashboardProvider({
   children,
   initial,
+  rangeDays,
+  setRangeDays,
 }: {
   children: ReactNode
   initial: DashboardPayload
+  rangeDays: MetricRangeDays
+  setRangeDays: (value: MetricRangeDays) => void
 }) {
-  const [rangeDays, setRangeDays] = useStoredRange()
   const [config, setConfig] = useState<Config>(initial.config)
   const [metrics, setMetrics] = useState<MetricsPayload>(initial.metrics)
   const [status, setStatus] = useState<MonitorState>(initial.status)
@@ -66,35 +71,47 @@ export function DashboardProvider({
   const [dirtyPanel, setDirtyPanel] = useState<DashboardSection | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const runtimePollRef = useRef(false)
 
   const showError = useCallback((err: unknown) => {
     setError(err instanceof Error ? err.message : String(err))
+  }, [])
+
+  const applyDashboardPayload = useCallback((payload: DashboardPayload) => {
+    setConfig(payload.config)
+    setMetrics(payload.metrics)
+    setStatus(payload.status)
+    setProxyText(payload.proxies.text)
   }, [])
 
   const loadDashboard = useCallback(
     async (days = rangeDays) => {
       setError('')
       const payload = await getDashboardFn({ data: { days } })
-      setConfig(payload.config)
-      setMetrics(payload.metrics)
-      setStatus(payload.status)
-      setProxyText(payload.proxies.text)
+      applyDashboardPayload(payload)
     },
-    [rangeDays],
+    [applyDashboardPayload, rangeDays],
   )
 
   const refreshRuntime = useCallback(
     async (days = rangeDays) => {
-      const payload = await getRuntimeFn({ data: { days } })
-      setMetrics(payload.metrics)
-      setStatus(payload.status)
+      if (runtimePollRef.current) return
+
+      runtimePollRef.current = true
+      try {
+        const payload = await getRuntimeFn({ data: { days } })
+        setMetrics((current) => mergeRuntimeMetrics(current, payload.metrics))
+        setStatus(payload.status)
+      } finally {
+        runtimePollRef.current = false
+      }
     },
     [rangeDays],
   )
 
   useEffect(() => {
-    void loadDashboard(rangeDays).catch(showError)
-  }, [loadDashboard, rangeDays, showError])
+    applyDashboardPayload(initial)
+  }, [applyDashboardPayload, initial])
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -208,4 +225,34 @@ export function useDashboardActions() {
   if (!context)
     throw new Error('useDashboardActions must be used within DashboardProvider')
   return context
+}
+
+function mergeRuntimeMetrics(
+  current: MetricsPayload,
+  runtime: RuntimeMetricsPayload,
+): MetricsPayload {
+  return {
+    ...current,
+    rounds: mergeRuntimeRounds(current.rounds, runtime.rounds),
+    summary: {
+      ...current.summary,
+      ...runtime.summary,
+      lastTimestamp: runtime.lastMetricTimestamp,
+      metricVersion: runtime.metricVersion,
+    },
+  }
+}
+
+function mergeRuntimeRounds(
+  current: MetricsPayload['rounds'],
+  incoming: RuntimeMetricsPayload['rounds'],
+): MetricsPayload['rounds'] {
+  const currentById = new Map(current.map((round) => [round.id, round]))
+
+  return incoming
+    .map((round) => ({
+      ...round,
+      config_json: currentById.get(round.id)?.config_json || '',
+    }))
+    .sort((a, b) => b.id - a.id)
 }
