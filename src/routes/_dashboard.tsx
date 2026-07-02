@@ -34,7 +34,7 @@ export const Route = createFileRoute('/_dashboard')({
 
 function DashboardRoute() {
   const { days } = Route.useSearch()
-  const navigate = useNavigate()
+  const navigate = useNavigate({ from: Route.fullPath })
   const setRangeDays = useCallback(
     (value: MetricRangeDays) => {
       void navigate({

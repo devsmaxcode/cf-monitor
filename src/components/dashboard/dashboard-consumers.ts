@@ -3,11 +3,14 @@ import type { FormEvent } from 'react'
 import type { Config, MetricsPagePayload } from '#/lib/monitor.server'
 import {
   deleteMetricDataFn,
+  getMetricAgeRowsFn,
+  getMetricProxyRowsFn,
+  getMetricRoundRowsFn,
   getMetricRowsPageFn,
 } from '#/lib/monitor.functions'
-import { unique, usedProxyRows } from './helpers'
+import { usedProxyRows } from './helpers'
 import { useDashboardActions, useDashboardData } from './dashboard-context'
-import type { ConfigDraft, MetricFilters } from './types'
+import type { ConfigDraft, MetricFilters, MetricRow } from './types'
 
 export function useDashboardChrome() {
   const { config, metrics, status } = useDashboardData()
@@ -15,7 +18,7 @@ export function useDashboardChrome() {
   return { config, error, metrics, status, triggerAction }
 }
 
-export function useMetricsConsumer() {
+export function useMetricsConsumer(initialMetricsPage?: MetricsPagePayload) {
   const { metrics, rangeDays } = useDashboardData()
   const { setRangeDays } = useDashboardActions()
   const [query, setQuery] = useState('')
@@ -26,35 +29,13 @@ export function useMetricsConsumer() {
   const [pageIndex, setPageIndex] = useState(1)
   const [pageSize, setPageSizeState] = useState(50)
   const [pagedMetrics, setPagedMetrics] = useState<MetricsPagePayload | null>(
-    null,
+    initialMetricsPage ?? null,
   )
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!initialMetricsPage)
   const [pageError, setPageError] = useState('')
   const [deletingMetrics, setDeletingMetrics] = useState(false)
   const [refreshToken, setRefreshToken] = useState(0)
 
-  const countries = useMemo(
-    () =>
-      pagedMetrics?.countries ??
-      unique(metrics.rows.map((row) => row.proxy_country || 'unknown')),
-    [metrics.rows, pagedMetrics?.countries],
-  )
-  const pages = useMemo(
-    () =>
-      pagedMetrics?.pages ??
-      unique(metrics.rows.map((row) => row.page || '').filter(Boolean)),
-    [metrics.rows, pagedMetrics?.pages],
-  )
-  const statuses = useMemo(
-    () =>
-      pagedMetrics?.statuses ??
-      unique(
-        metrics.rows.map((row) =>
-          (row.cf_cache_status || (row.error ? 'FAIL' : '-')).toUpperCase(),
-        ),
-      ),
-    [metrics.rows, pagedMetrics?.statuses],
-  )
   const filters = useMemo(
     () =>
       ({
@@ -65,6 +46,32 @@ export function useMetricsConsumer() {
       }) satisfies MetricFilters,
     [cacheStatus, country, debouncedQuery, pageFilter],
   )
+  const defaultMetricsView =
+    !cacheStatus &&
+    !country &&
+    !debouncedQuery &&
+    !pageFilter &&
+    pageIndex === 1 &&
+    pageSize === 50
+  const initialMetricsFresh = Boolean(
+    initialMetricsPage &&
+      initialMetricsPage.totalRows === metrics.summary.totalRows &&
+      initialMetricsPage.range.availableTo === metrics.summary.lastTimestamp,
+  )
+  const metricsPage =
+    defaultMetricsView && initialMetricsFresh ? initialMetricsPage : pagedMetrics
+  const countries = useMemo(
+    () => metricsPage?.countries ?? [],
+    [metricsPage?.countries],
+  )
+  const pages = useMemo(
+    () => metricsPage?.pages ?? [],
+    [metricsPage?.pages],
+  )
+  const statuses = useMemo(
+    () => metricsPage?.statuses ?? [],
+    [metricsPage?.statuses],
+  )
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query), 300)
@@ -73,9 +80,20 @@ export function useMetricsConsumer() {
 
   useEffect(() => {
     let active = true
-    setLoading(true)
     setPageError('')
-    setPagedMetrics(null)
+
+    if (defaultMetricsView && initialMetricsFresh && initialMetricsPage) {
+      setPagedMetrics(initialMetricsPage)
+      setLoading(false)
+      return () => {
+        active = false
+      }
+    }
+
+    if (!metricsPage) {
+      setLoading(true)
+      setPagedMetrics(null)
+    }
 
     void getMetricRowsPageFn({
       data: {
@@ -101,7 +119,10 @@ export function useMetricsConsumer() {
       active = false
     }
   }, [
+    defaultMetricsView,
     filters,
+    initialMetricsFresh,
+    initialMetricsPage,
     metrics.summary.metricVersion,
     pageIndex,
     pageSize,
@@ -151,12 +172,12 @@ export function useMetricsConsumer() {
 
   return {
     cacheStatus,
-    columns: pagedMetrics?.columns ?? metrics.timeColumns,
+    columns: metricsPage?.columns ?? [],
     countries,
     country,
     deletingMetrics,
     error: pageError,
-    filteredRows: pagedMetrics?.rows ?? [],
+    filteredRows: metricsPage?.rows ?? [],
     loading,
     onDeleteMetricData: deleteMetricData,
     page: pageFilter,
@@ -173,15 +194,40 @@ export function useMetricsConsumer() {
     setQuery: setMetricQuery,
     setRangeDays: setMetricRangeDays,
     statuses,
-    totalGroups: pagedMetrics?.totalGroups ?? 0,
-    totalRows: pagedMetrics?.totalRows ?? metrics.summary.totalRows,
+    totalGroups: metricsPage?.totalGroups ?? 0,
+    totalRows: metricsPage?.totalRows ?? metrics.summary.totalRows,
   }
 }
 
 export function useAgeConsumer() {
   const { metrics, rangeDays } = useDashboardData()
   const { setRangeDays } = useDashboardActions()
-  return { rangeDays, rows: metrics.rows, setRangeDays }
+  const [rows, setRows] = useState<MetricRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setError('')
+
+    void getMetricAgeRowsFn({ data: { days: rangeDays } })
+      .then((payload) => {
+        if (active) setRows(payload.rows)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [metrics.summary.metricVersion, rangeDays])
+
+  return { error, loading, rangeDays, rows, setRangeDays }
 }
 
 export function useRoundsConsumer() {
@@ -191,12 +237,43 @@ export function useRoundsConsumer() {
     metrics.rounds.find((round) => round.id === selectedRoundId) ??
     metrics.rounds.at(0) ??
     null
+  const [rows, setRows] = useState<MetricRow[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!selectedRound) {
+      setRows([])
+      return
+    }
+
+    let active = true
+    setLoading(true)
+    setError('')
+
+    void getMetricRoundRowsFn({ data: { roundId: selectedRound.id } })
+      .then((payload) => {
+        if (active) setRows(payload.rows)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [metrics.summary.metricVersion, selectedRound])
 
   return {
     config,
+    error,
+    loading,
     rangeDays,
     rounds: metrics.rounds,
-    rows: metrics.rows,
+    rows,
     selectedRound,
     setSelectedRoundId,
     status,
@@ -242,6 +319,7 @@ function configToDraft(config: Config): ConfigDraft {
     missIntervalSeconds: String(config.missIntervalSeconds),
     retentionDays: String(config.retentionDays),
     roundIntervalSeconds: String(config.roundIntervalSeconds),
+    pageCountryOverrides: config.pageCountryOverrides,
     timeout: String(config.timeout),
   }
 }
@@ -254,6 +332,7 @@ function draftToConfig(draft: ConfigDraft): Config {
     hitIntervalSeconds: Number(draft.hitIntervalSeconds),
     maxProxiesPerCountry: Number(draft.maxProxiesPerCountry),
     missIntervalSeconds: Number(draft.missIntervalSeconds),
+    pageCountryOverrides: draft.pageCountryOverrides,
     retentionDays: Number(draft.retentionDays),
     roundIntervalSeconds: Number(draft.roundIntervalSeconds),
     timeout: Number(draft.timeout),
@@ -261,14 +340,29 @@ function draftToConfig(draft: ConfigDraft): Config {
 }
 
 export function useProxiesConsumer() {
-  const { metrics, proxyText } = useDashboardData()
+  const { metrics, proxyText, rangeDays } = useDashboardData()
   const { saveProxyDraft, saving, setDirtyPanel } = useDashboardActions()
   const [draft, setDraft] = useState(proxyText)
   const [dirty, setDirty] = useState(false)
+  const [rows, setRows] = useState<MetricRow[]>([])
   const proxyRows = useMemo(
-    () => usedProxyRows(metrics.rows, proxyText),
-    [metrics.rows, proxyText],
+    () => usedProxyRows(rows, proxyText),
+    [proxyText, rows],
   )
+
+  useEffect(() => {
+    let active = true
+
+    void getMetricProxyRowsFn({ data: { days: rangeDays } })
+      .then((payload) => {
+        if (active) setRows(payload.rows)
+      })
+      .catch(() => undefined)
+
+    return () => {
+      active = false
+    }
+  }, [metrics.summary.metricVersion, rangeDays])
 
   useEffect(() => {
     if (dirty) return

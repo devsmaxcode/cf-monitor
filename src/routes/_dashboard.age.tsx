@@ -10,6 +10,8 @@ function AgeRoute() {
   const dashboard = useAgeConsumer()
   return (
     <AgePanel
+      error={dashboard.error}
+      loading={dashboard.loading}
       rangeDays={dashboard.rangeDays}
       rows={dashboard.rows}
       setRangeDays={dashboard.setRangeDays}

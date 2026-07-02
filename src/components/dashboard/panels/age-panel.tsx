@@ -19,10 +19,14 @@ import type { CacheAgeBucket } from '../helpers'
 import type { MetricRow } from '../types'
 
 export function AgePanel({
+  error,
+  loading,
   rangeDays,
   rows,
   setRangeDays,
 }: {
+  error: string
+  loading: boolean
   rangeDays: MetricRangeDays
   rows: MetricRow[]
   setRangeDays: (value: MetricRangeDays) => void
@@ -128,7 +132,11 @@ export function AgePanel({
             Filtering links...
           </div>
         ) : null}
-        {filteredRows.length && buckets.length ? (
+        {loading ? (
+          <div className="empty-state">Loading cache age data...</div>
+        ) : error ? (
+          <div className="empty-state">{error}</div>
+        ) : filteredRows.length && buckets.length ? (
           <AgeDashboard buckets={buckets} rows={filteredRows} />
         ) : (
           <div className="empty-state">

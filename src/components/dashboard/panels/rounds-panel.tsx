@@ -92,12 +92,18 @@ export function RoundsPanel(props: RoundsPanelProps) {
             </div>
           </div>
           {selected ? (
-            <RoundDetails
-              config={props.config}
-              maxRows={stats.maxRows}
-              round={selected}
-              rows={props.rows}
-            />
+            props.loading ? (
+              <div className="empty-state">Loading round details...</div>
+            ) : props.error ? (
+              <div className="empty-state">{props.error}</div>
+            ) : (
+              <RoundDetails
+                config={props.config}
+                maxRows={stats.maxRows}
+                round={selected}
+                rows={props.rows}
+              />
+            )
           ) : (
             <div className="empty-state">
               Run the monitor once to populate round stats.

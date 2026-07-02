@@ -65,6 +65,7 @@ type RequestLimiter = <T>(task: () => Promise<T>) => Promise<T>
 type CollectorArgs = {
   pages?: string
   proxies?: string
+  pageCountryOverrides?: string
   proxySource: string
   clarketmSource: string
   clarketmStatusSource: string
@@ -115,6 +116,7 @@ function parseArgs(): CollectorArgs {
   const map: Record<string, string> = {
     '--pages': 'pages',
     '--proxies': 'proxies',
+    '--page-country-overrides': 'pageCountryOverrides',
     '--proxy-source': 'proxySource',
     '--clarketm-source': 'clarketmSource',
     '--clarketm-status-source': 'clarketmStatusSource',
@@ -213,6 +215,7 @@ function usage(code: number): never {
 
 Options:
   --pages pages.txt       full target URLs, default: ${DEFAULT_PAGES.length} common Ummah One URLs
+  --page-country-overrides overrides.json
   --proxy-countries Bangladesh,India,United States
   --max-proxies-per-country 25
   --rounds 1              0 = forever
@@ -283,6 +286,25 @@ async function fetchText(url: string, timeout: number, maxBytes = 5_000_000) {
   if (Buffer.byteLength(text) > maxBytes)
     throw new Error(`response too large: ${url}`)
   return text
+}
+
+async function readPageCountryOverrides(path?: string) {
+  if (!path) return {}
+
+  const value = JSON.parse(await readFile(path, 'utf8')) as Record<
+    string,
+    unknown
+  >
+  const overrides: Record<string, string> = {}
+
+  for (const [page, country] of Object.entries(value)) {
+    const normalizedCountry = countryCode(String(country || '').trim())
+    if (/^[A-Z]{2}$/.test(normalizedCountry)) {
+      overrides[targetUrl(page)] = normalizedCountry
+    }
+  }
+
+  return overrides
 }
 
 function proxyBucket(proxy: string) {
@@ -662,6 +684,7 @@ async function appendRows(output: string, rows: Metrics[]) {
 async function openRound(
   args: ReturnType<typeof parseArgs>,
   pages: string[],
+  pageCountryOverrides: Record<string, string>,
   sequence: number,
 ) {
   if (args.roundId > 0) return args.roundId
@@ -671,15 +694,20 @@ async function openRound(
     pageCount: pages.length,
     proxyCountryCount:
       countries(args.proxyCountries).length + (args.noDirect ? 0 : 1),
-    configJson: roundConfigJson(args, pages),
+    configJson: roundConfigJson(args, pages, pageCountryOverrides),
   })
   console.log(`opened database round ${round.id}`)
   return round.id
 }
 
-function roundConfigJson(args: ReturnType<typeof parseArgs>, pages: string[]) {
+function roundConfigJson(
+  args: ReturnType<typeof parseArgs>,
+  pages: string[],
+  pageCountryOverrides: Record<string, string>,
+) {
   return JSON.stringify({
     pages,
+    pageCountryOverrides,
     proxyCountries: args.proxyCountries,
     maxProxiesPerCountry: args.maxProxiesPerCountry,
     timeout: args.timeout,
@@ -699,6 +727,16 @@ function proxyLabel(proxy: string | null) {
   const url = new URL(proxy)
   if (!url.password) return proxy
   return `${url.protocol}//${url.username}:***@${url.host}`
+}
+
+function proxiesForPage(
+  page: string,
+  proxies: ProxyItem[],
+  pageCountryOverrides: Record<string, string>,
+) {
+  const country = pageCountryOverrides[page]
+  if (!country) return proxies
+  return proxies.filter((proxy) => proxy.country === country)
 }
 
 function errorName(error: unknown) {
@@ -775,12 +813,16 @@ async function checkProxyGroup(
 async function checkPage(
   page: string,
   proxies: ProxyItem[],
+  pageCountryOverrides: Record<string, string>,
   roundId: number,
   args: ReturnType<typeof parseArgs>,
 ): Promise<CheckResult> {
   logPageRequest(roundId, page)
   const url = page
-  const groups = proxyGroups(proxies, args.shuffleProxies)
+  const groups = proxyGroups(
+    proxiesForPage(page, proxies, pageCountryOverrides),
+    args.shuffleProxies,
+  )
   const groupResults = await mapLimit(
     groups,
     args.countryConcurrency,
@@ -797,19 +839,22 @@ async function main() {
   const args = parseArgs()
   const pageList = await readList(args.pages)
   const pages = (pageList.length ? pageList : DEFAULT_PAGES).map(targetUrl)
+  const pageCountryOverrides = await readPageCountryOverrides(
+    args.pageCountryOverrides,
+  )
 
   for (let round = 1; args.rounds === 0 || round <= args.rounds; round++) {
     let roundId = 0
     let rowCount = 0
     let recheckCount = 0
     try {
-      roundId = await openRound(args, pages, round)
+      roundId = await openRound(args, pages, pageCountryOverrides, round)
       const ownsRound = args.roundId <= 0
       const proxies = await loadProxies(args)
       const rows: Metrics[] = []
       const rechecks: RecheckTarget[] = []
       const pageResults = await mapLimit(pages, args.pageConcurrency, (page) =>
-        checkPage(page, proxies, roundId, args),
+        checkPage(page, proxies, pageCountryOverrides, roundId, args),
       )
 
       for (const result of pageResults) {

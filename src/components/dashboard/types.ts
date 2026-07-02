@@ -2,15 +2,14 @@ import type {
   Config,
   DashboardPayload,
   MetricRangeDays,
-  MetricsPayload,
   MonitorState,
 } from '#/lib/monitor.server'
-import type { MetricRoundRow } from '#/lib/metrics-db'
+import type { MetricRoundRow, MetricRow as MetricDbRow } from '#/lib/metrics-db'
 import type { MetricTimeColumn } from './helpers'
 
 export type DashboardSection =
   'metrics' | 'rounds' | 'age' | 'config' | 'proxies' | 'logs'
-export type MetricRow = MetricsPayload['rows'][number]
+export type MetricRow = MetricDbRow
 
 export type DashboardRouteProps = {
   initial: DashboardPayload
@@ -88,6 +87,8 @@ export type MetricsPanelProps = {
 
 export type RoundsPanelProps = {
   config: Config
+  error: string
+  loading: boolean
   rangeDays: MetricRangeDays
   rounds: MetricRoundRow[]
   rows: MetricRow[]

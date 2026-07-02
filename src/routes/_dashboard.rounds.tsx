@@ -11,6 +11,8 @@ function RoundsRoute() {
   return (
     <RoundsPanel
       config={dashboard.config}
+      error={dashboard.error}
+      loading={dashboard.loading}
       rangeDays={dashboard.rangeDays}
       rounds={dashboard.rounds}
       rows={dashboard.rows}

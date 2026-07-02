@@ -4,6 +4,9 @@ import type { Config } from './monitor.server'
 import {
   deleteMetricData,
   getDashboard,
+  getMetricAgeRows,
+  getMetricProxyRows,
+  getMetricRoundRows,
   getMetricRowsPage,
   getRuntime,
   readProxies,
@@ -44,6 +47,10 @@ const metricRowsPageSchema = daysSchema.extend({
   maxColumns: z.number().int().min(1).max(200).optional(),
 })
 
+const metricRoundRowsSchema = z.object({
+  roundId: z.number().int().min(1),
+})
+
 const proxyTextSchema = z.object({ text: z.string() })
 
 const configSchema: z.ZodType<Config> = z
@@ -51,6 +58,7 @@ const configSchema: z.ZodType<Config> = z
     pages: z.array(z.string()),
     output: z.string(),
     proxyCountries: z.string(),
+    pageCountryOverrides: z.record(z.string(), z.string()).default({}),
     maxProxiesPerCountry: z.number(),
     timeout: z.number(),
     delay: z.number(),
@@ -79,6 +87,18 @@ export const getMetricRowsPageFn = createServerFn({ method: 'GET' })
   .validator((input: unknown) => metricRowsPageSchema.parse(input))
   .handler(({ data }) => getMetricRowsPage(data))
 
+export const getMetricAgeRowsFn = createServerFn({ method: 'GET' })
+  .validator((input: unknown) => daysSchema.parse(input))
+  .handler(({ data }) => getMetricAgeRows(data.days))
+
+export const getMetricProxyRowsFn = createServerFn({ method: 'GET' })
+  .validator((input: unknown) => daysSchema.parse(input))
+  .handler(({ data }) => getMetricProxyRows(data.days))
+
+export const getMetricRoundRowsFn = createServerFn({ method: 'GET' })
+  .validator((input: unknown) => metricRoundRowsSchema.parse(input))
+  .handler(({ data }) => getMetricRoundRows(data))
+
 export const deleteMetricDataFn = createServerFn({ method: 'POST' }).handler(
   () => deleteMetricData(),
 )
@@ -87,22 +107,22 @@ export const saveConfigFn = createServerFn({ method: 'POST' })
   .validator((input: unknown) => configSchema.parse(input))
   .handler(({ data }) => saveConfig(sanitizeConfig(data)))
 
-export const getProxiesFn = createServerFn({ method: 'GET' }).handler(
-  () => readProxies(),
+export const getProxiesFn = createServerFn({ method: 'GET' }).handler(() =>
+  readProxies(),
 )
 
 export const saveProxiesFn = createServerFn({ method: 'POST' })
   .validator((input: unknown) => proxyTextSchema.parse(input))
   .handler(({ data }) => saveProxies(data.text))
 
-export const startMonitorFn = createServerFn({ method: 'POST' }).handler(
-  () => startMonitor(),
+export const startMonitorFn = createServerFn({ method: 'POST' }).handler(() =>
+  startMonitor(),
 )
 
-export const stopMonitorFn = createServerFn({ method: 'POST' }).handler(
-  () => stopMonitor(),
+export const stopMonitorFn = createServerFn({ method: 'POST' }).handler(() =>
+  stopMonitor(),
 )
 
-export const runOnceFn = createServerFn({ method: 'POST' }).handler(
-  () => runOnce(),
+export const runOnceFn = createServerFn({ method: 'POST' }).handler(() =>
+  runOnce(),
 )

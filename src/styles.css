@@ -2564,7 +2564,7 @@ h3 {
 
 .config-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.75fr);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.36fr);
 }
 
 .config-column {
@@ -2600,7 +2600,7 @@ label small {
 .form-section {
   border-bottom: 1px solid var(--line);
   display: grid;
-  gap: 16px;
+  gap: 18px;
   padding: 20px;
 }
 
@@ -2632,6 +2632,139 @@ label small {
 
 .config-grid.schedule {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
+.target-editor {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.target-list-head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.target-list-head > span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.target-preview {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.target-table-head,
+.target-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, 220px) 36px;
+}
+
+.target-table-head {
+  background: #f6faf8;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  padding: 8px 10px;
+  text-transform: uppercase;
+}
+
+.target-row-list {
+  max-height: 430px;
+  overflow: auto;
+}
+
+.target-row {
+  background: #ffffff;
+  border-bottom: 1px solid #eef2f0;
+  padding: 8px 10px;
+}
+
+.target-row:last-child {
+  border-bottom: 0;
+}
+
+.target-row input,
+.target-row select {
+  background: #ffffff;
+  min-height: 36px;
+  padding-bottom: 7px;
+  padding-top: 7px;
+}
+
+.target-remove {
+  height: 36px;
+  width: 36px;
+}
+
+.target-head-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.target-view-toggle {
+  background: var(--panel-soft);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(76px, 1fr));
+  min-height: 38px;
+  overflow: hidden;
+}
+
+.target-view-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  padding: 0 12px;
+}
+
+.target-view-toggle button.selected {
+  background: #ffffff;
+  color: var(--text);
+}
+
+.config-textarea-json {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  min-height: 320px;
+  resize: vertical;
+}
+
+.proxy-location-grid {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, 220px);
+}
+
+.proxy-location-grid > label {
+  align-content: start;
+}
+
+.proxy-countries-field textarea {
+  height: 136px;
+  resize: none;
+}
+
+.proxy-limit-field input {
+  max-width: 220px;
 }
 
 .config-panel .form-actions {
@@ -2817,6 +2950,27 @@ textarea {
 
   .round-meta-list div:nth-child(odd) {
     padding-right: 0;
+  }
+
+  .target-list-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .target-row {
+    grid-template-columns: 1fr;
+  }
+
+  .target-remove {
+    justify-self: start;
+  }
+
+  .target-head-actions {
+    justify-content: flex-start;
+  }
+
+  .proxy-location-grid {
+    grid-template-columns: 1fr;
   }
 
   .top-hit-row {

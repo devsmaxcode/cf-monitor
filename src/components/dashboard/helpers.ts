@@ -113,9 +113,26 @@ export function normalizeDraft(config: Config): Config {
   return {
     ...config,
     pages: normalizeList(config.pages.join('\n')),
+    pageCountryOverrides: normalizePageCountryOverrides(
+      config.pages,
+      config.pageCountryOverrides,
+    ),
     proxyCountries: normalizeList(config.proxyCountries).join(','),
     hitIntervalSeconds: config.roundIntervalSeconds,
   }
+}
+
+function normalizePageCountryOverrides(
+  pages: string[],
+  overrides: Record<string, string>,
+) {
+  const pageSet = new Set(pages.map((page) => page.trim()).filter(Boolean))
+  return Object.fromEntries(
+    Object.entries(overrides).filter(
+      ([page, country]) =>
+        pageSet.has(page.trim()) && /^[A-Z]{2}$/.test(country),
+    ),
+  )
 }
 
 export function normalizeList(value: string) {

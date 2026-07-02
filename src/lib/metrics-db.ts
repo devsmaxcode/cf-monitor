@@ -1,16 +1,10 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import initSqlJs from 'sql.js'
-import type { Database as SqlJsDatabase, SqlValue } from 'sql.js'
+import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 export const DEFAULT_METRICS_DB = 'storage/cloudflare-cache-metrics.sqlite'
 
 const DAY_MS = 24 * 60 * 60 * 1000
-const projectRoot = resolve(process.env.APP_ROOT || process.cwd())
-const SQL_READY = initSqlJs({
-  locateFile: (file) =>
-    join(projectRoot, 'node_modules', 'sql.js', 'dist', file),
-})
 
 export const METRIC_FIELDS = [
   'id',
@@ -129,8 +123,30 @@ export type MetricRuntimeSummary = {
 export type AppSettingKey = 'dashboard-config' | 'proxy-list'
 
 type DbHandle = {
-  db: SqlJsDatabase
+  db: MetricsDb
   filename: string
+}
+
+type MetricsDb = {
+  close: () => void
+  prepare: (sql: string) => MetricsStmt
+  run: (sql: string, params?: unknown[]) => void
+  select: (sql: string, params?: unknown[]) => Record<string, unknown>[]
+}
+
+type MetricsStmt = {
+  free: () => void
+  run: (params?: unknown[]) => void
+}
+
+type NativeSqliteDb = {
+  close: () => void
+  prepare: (sql: string) => NativeSqliteStmt
+}
+
+type NativeSqliteStmt = {
+  all: (...params: unknown[]) => unknown[]
+  run: (...params: unknown[]) => unknown
 }
 
 export function normalizeMetricsOutput(output?: string) {
@@ -157,7 +173,7 @@ export async function appendMetricRows(
 ) {
   if (!rows.length) return
 
-  await withMetricsDb(output, baseDir, true, ({ db }) => {
+  await withMetricsDb(output, baseDir, ({ db }) => {
     db.run('BEGIN')
     try {
       const stmt = db.prepare(`
@@ -209,7 +225,7 @@ export async function readMetricRows(
   baseDir = process.cwd(),
   dateRange: MetricRowsQuery = {},
 ) {
-  return withMetricsDb(output, baseDir, false, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const range = normalizeMetricDateRange(dateRange)
     const filtered = metricQueryWhere(range)
     const order = dateRange.order === 'desc' ? 'DESC' : 'ASC'
@@ -236,12 +252,43 @@ export async function readMetricRows(
   })
 }
 
+export async function readMetricRowsForRound(
+  output: string,
+  roundId: number,
+  baseDir = process.cwd(),
+) {
+  return withMetricsDb(output, baseDir, ({ db }) => {
+    const id = String(roundId)
+    const rows = selectRows(
+      db,
+      `
+        SELECT
+          id, round_id, timestamp_utc, round, page, url, proxy, proxy_country, status_code,
+          cf_cache_status, cf_ray, cf_edge, age_seconds, response_ms,
+          content_length, content_type, cache_control, server, error
+        FROM cache_metrics
+        WHERE
+          deleted_at = ''
+          AND (
+            CAST(round_id AS TEXT) = ?
+            OR round = ?
+            OR round = ?
+          )
+        ORDER BY id ASC
+      `,
+      [id, id, `${id}-recheck`],
+    )
+
+    return rows.map(metricRowFromDb)
+  })
+}
+
 export async function readMetricRowsPage(
   output: string,
   baseDir = process.cwd(),
   input: MetricRowsPageInput = {},
 ) {
-  return withMetricsDb(output, baseDir, false, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const range = normalizeMetricDateRange(input)
     const maxColumns = boundedInteger(input.maxColumns, 1, 200, 80)
     const pageSize = boundedInteger(input.pageSize, 1, 200, 50)
@@ -363,7 +410,7 @@ export async function readMetricRuntimeSummary(
   baseDir = process.cwd(),
   dateRange: MetricDateRange = {},
 ) {
-  return withMetricsDb(output, baseDir, false, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const range = normalizeMetricDateRange(dateRange)
     const filtered = metricQueryWhere(range)
     const [totalRow] = selectRows(
@@ -429,7 +476,7 @@ export async function createMetricRound(
   input: CreateMetricRoundInput = {},
   baseDir = process.cwd(),
 ) {
-  return withMetricsDb(output, baseDir, true, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     db.run(
       `
         INSERT INTO cache_rounds (
@@ -471,7 +518,7 @@ export async function finalizeMetricRound(
 ) {
   if (!roundId) return null
 
-  return withMetricsDb(output, baseDir, true, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const existing = selectRows(
       db,
       'SELECT started_at FROM cache_rounds WHERE id = ? LIMIT 1',
@@ -531,7 +578,7 @@ export async function applyMetricRoundRetention(
   keepDays = 0,
   baseDir = process.cwd(),
 ) {
-  await withMetricsDb(output, baseDir, true, ({ db }) =>
+  await withMetricsDb(output, baseDir, ({ db }) =>
     pruneOldMetricRounds(db, keepDays),
   )
 }
@@ -540,7 +587,7 @@ export async function softDeleteMetricData(
   output: string,
   baseDir = process.cwd(),
 ) {
-  return withMetricsDb(output, baseDir, true, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const deletedAt = nowIso()
     const [metricCount] = selectRows(
       db,
@@ -574,7 +621,7 @@ export async function readAppSetting(
   output = DEFAULT_METRICS_DB,
   baseDir = process.cwd(),
 ) {
-  return withMetricsDb(output, baseDir, false, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const row = selectRows(
       db,
       'SELECT value FROM app_settings WHERE key = ? LIMIT 1',
@@ -590,7 +637,7 @@ export async function writeAppSetting(
   output = DEFAULT_METRICS_DB,
   baseDir = process.cwd(),
 ) {
-  await withMetricsDb(output, baseDir, true, ({ db }) => {
+  await withMetricsDb(output, baseDir, ({ db }) => {
     db.run(
       `
         INSERT INTO app_settings (key, value, updated_at)
@@ -609,7 +656,7 @@ export async function readMetricRounds(
   baseDir = process.cwd(),
   dateRange: MetricDateRange = {},
 ) {
-  return withMetricsDb(output, baseDir, false, ({ db }) => {
+  return withMetricsDb(output, baseDir, ({ db }) => {
     const range = normalizeMetricDateRange(dateRange)
     const rows = selectRows(
       db,
@@ -641,13 +688,11 @@ export async function readMetricRounds(
 async function withMetricsDb<T>(
   output: string,
   baseDir: string,
-  persist: boolean,
   callback: (handle: DbHandle) => T,
 ) {
-  const handle = await openMetricsDb(output, baseDir, persist)
+  const handle = await openMetricsDb(output, baseDir)
   try {
     const result = callback(handle)
-    if (persist) await persistDb(handle)
     return result
   } finally {
     handle.db.close()
@@ -657,21 +702,52 @@ async function withMetricsDb<T>(
 async function openMetricsDb(
   output: string,
   baseDir = process.cwd(),
-  persist = false,
 ): Promise<DbHandle> {
   const filename = resolveMetricsDbPath(output, baseDir)
-  if (persist) await mkdir(dirname(filename), { recursive: true })
+  await mkdir(dirname(filename), { recursive: true })
 
-  const SQL = await SQL_READY
-  const db = new SQL.Database(
-    (await exists(filename)) ? await readFile(filename) : undefined,
-  )
+  const db = await createMetricsDb(filename)
+  db.run('PRAGMA journal_mode = WAL')
+  db.run('PRAGMA busy_timeout = 5000')
   ensureMetricsSchema(db)
   return { db, filename }
 }
 
-async function persistDb({ db, filename }: DbHandle) {
-  await writeFile(filename, Buffer.from(db.export()))
+async function createMetricsDb(filename: string): Promise<MetricsDb> {
+  if (isBunRuntime()) {
+    const { Database: BunDatabase } = await import('bun:sqlite')
+    return adaptNativeSqliteDb(
+      new BunDatabase(filename) as unknown as NativeSqliteDb,
+    )
+  }
+
+  const { default: Database } = await import('better-sqlite3')
+  const raw: BetterSqliteDatabase = new Database(filename)
+  return adaptNativeSqliteDb(raw as unknown as NativeSqliteDb)
+}
+
+function isBunRuntime() {
+  return 'Bun' in globalThis
+}
+
+function adaptNativeSqliteDb(raw: NativeSqliteDb): MetricsDb {
+  return {
+    close: () => raw.close(),
+    prepare: (sql) => {
+      const stmt = raw.prepare(sql)
+      return {
+        free: () => undefined,
+        run: (params = []) => {
+          stmt.run(...params)
+        },
+      }
+    },
+    run: (sql, params = []) => {
+      raw.prepare(sql).run(...params)
+    },
+    select: (sql, params = []) =>
+      raw.prepare(sql).all(...params) as Record<string, unknown>[],
+  }
 }
 
 function metricsStorageDir(baseDir: string) {
@@ -680,16 +756,7 @@ function metricsStorageDir(baseDir: string) {
   )
 }
 
-async function exists(path: string) {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function ensureMetricsSchema(db: SqlJsDatabase) {
+function ensureMetricsSchema(db: MetricsDb) {
   db.run(`
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
@@ -789,7 +856,7 @@ function ensureMetricsSchema(db: SqlJsDatabase) {
   )
 }
 
-function addRoundIdColumnIfMissing(db: SqlJsDatabase) {
+function addRoundIdColumnIfMissing(db: MetricsDb) {
   const columns = selectRows(db, 'PRAGMA table_info(cache_metrics)')
   if (columns.some((column) => value(column.name) === 'round_id')) return
   db.run(
@@ -797,7 +864,7 @@ function addRoundIdColumnIfMissing(db: SqlJsDatabase) {
   )
 }
 
-function backfillLegacyRound(db: SqlJsDatabase) {
+function backfillLegacyRound(db: MetricsDb) {
   const pending = selectRows(
     db,
     'SELECT COUNT(*) AS count FROM cache_metrics WHERE round_id = 0',
@@ -852,14 +919,14 @@ function backfillLegacyRound(db: SqlJsDatabase) {
 }
 
 function addDeletedAtColumnIfMissing(
-  db: SqlJsDatabase,
+  db: MetricsDb,
   table: 'cache_metrics' | 'cache_rounds',
 ) {
   addColumnIfMissing(db, table, 'deleted_at', "TEXT NOT NULL DEFAULT ''")
 }
 
 function addColumnIfMissing(
-  db: SqlJsDatabase,
+  db: MetricsDb,
   table: 'cache_metrics' | 'cache_rounds',
   column: string,
   definition: string,
@@ -869,7 +936,7 @@ function addColumnIfMissing(
   db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
 }
 
-function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
+function metricRoundCounts(db: MetricsDb, roundId: number) {
   const row = selectRows(
     db,
     `
@@ -887,7 +954,7 @@ function metricRoundCounts(db: SqlJsDatabase, roundId: number) {
   }
 }
 
-function pruneOldMetricRounds(db: SqlJsDatabase, keepDays: number) {
+function pruneOldMetricRounds(db: MetricsDb, keepDays: number) {
   const keep = integer(keepDays)
   if (keep <= 0) return
 
@@ -922,16 +989,8 @@ function pruneOldMetricRounds(db: SqlJsDatabase, keepDays: number) {
   )
 }
 
-function selectRows(db: SqlJsDatabase, sql: string, params: unknown[] = []) {
-  const stmt = db.prepare(sql)
-  const rows: Record<string, unknown>[] = []
-  try {
-    stmt.bind(params as SqlValue[])
-    while (stmt.step()) rows.push(stmt.getAsObject())
-  } finally {
-    stmt.free()
-  }
-  return rows
+function selectRows(db: MetricsDb, sql: string, params: unknown[] = []) {
+  return db.select(sql, params)
 }
 
 function metricRowFromDb(row: Record<string, unknown>): MetricRow {
@@ -1033,7 +1092,7 @@ function metricColumnWhere(columns: MetricColumnSummary[]) {
 }
 
 function metricDistinctValues(
-  db: SqlJsDatabase,
+  db: MetricsDb,
   field: 'page' | 'proxy_country',
   base: MetricSqlFilter,
 ) {
@@ -1051,7 +1110,7 @@ function metricDistinctValues(
   return rows.map((row) => value(row.value)).filter(Boolean)
 }
 
-function metricStatusValues(db: SqlJsDatabase, base: MetricSqlFilter) {
+function metricStatusValues(db: MetricsDb, base: MetricSqlFilter) {
   const rows = selectRows(
     db,
     `

@@ -12,6 +12,7 @@ import {
   resolveMetricsDbPath,
   readMetricRuntimeSummary,
   readMetricRowsPage,
+  readMetricRowsForRound,
   readMetricRows,
   readMetricRounds,
   softDeleteMetricData,
@@ -42,6 +43,7 @@ export type Config = {
   pages: string[]
   output: string
   proxyCountries: string
+  pageCountryOverrides: Record<string, string>
   maxProxiesPerCountry: number
   timeout: number
   delay: number
@@ -85,7 +87,7 @@ export type CrawlProgress = {
   activeUrl: string | null
 }
 
-export type MetricsPayload = Awaited<ReturnType<typeof buildMetrics>>
+export type MetricsPayload = Awaited<ReturnType<typeof buildDashboardMetrics>>
 export type RuntimeMetricsPayload = Awaited<
   ReturnType<typeof buildRuntimeMetrics>
 >
@@ -111,6 +113,7 @@ const configPath = join(storageDir, 'dashboard-config.json')
 const runtimePath = join(storageDir, 'monitor-runtime.json')
 const pagesPath = join(storageDir, 'pages.txt')
 const proxiesPath = join(storageDir, 'proxies.txt')
+const pageCountryOverridesPath = join(storageDir, 'page-country-overrides.json')
 const dashboardConfigSetting = 'dashboard-config'
 const proxyListSetting = 'proxy-list'
 const appSettingsDbOutput = DEFAULT_METRICS_DB
@@ -138,6 +141,7 @@ const defaultConfig: Config = {
   output: DEFAULT_METRICS_DB,
   proxyCountries:
     'Bangladesh,India,United States,United Kingdom,Canada,Germany,France,Singapore,Japan,Australia',
+  pageCountryOverrides: {},
   maxProxiesPerCountry: 8,
   timeout: 5,
   delay: 0,
@@ -305,6 +309,11 @@ export function sanitizeConfig(
 ): Config {
   const { baseUrl: _baseUrl, ...configValue } = value
   const legacyBaseUrl = String(value.baseUrl || legacyDefaultBaseUrl).trim()
+  const pages = Array.isArray(value.pages)
+    ? value.pages
+        .map((page) => normalizeTargetUrl(String(page).trim(), legacyBaseUrl))
+        .filter(Boolean)
+    : defaultPages
   const roundIntervalSeconds = clamp(
     Number(value.roundIntervalSeconds ?? value.hitIntervalSeconds),
     15,
@@ -315,11 +324,12 @@ export function sanitizeConfig(
   return {
     ...defaultConfig,
     ...configValue,
-    pages: Array.isArray(value.pages)
-      ? value.pages
-          .map((page) => normalizeTargetUrl(String(page).trim(), legacyBaseUrl))
-          .filter(Boolean)
-      : defaultPages,
+    pages,
+    pageCountryOverrides: sanitizePageCountryOverrides(
+      value.pageCountryOverrides,
+      pages,
+      legacyBaseUrl,
+    ),
     maxProxiesPerCountry: clamp(Number(value.maxProxiesPerCountry), 1, 100, 8),
     timeout: clamp(Number(value.timeout), 1, 60, 5),
     delay: clamp(Number(value.delay), 0, 60, 0),
@@ -381,7 +391,7 @@ export async function getDashboard(
 ): Promise<DashboardPayload> {
   const config = await readConfig()
   const [metrics, proxies] = await Promise.all([
-    buildMetrics(config, metricRange(days)),
+    buildDashboardMetrics(config, metricRange(days)),
     readProxies(),
   ])
 
@@ -410,6 +420,7 @@ export async function getRuntime(days: MetricRangeDays) {
 export async function getMetricRowsPage(input: {
   days: MetricRangeDays
   filters?: MetricRowFilters
+  maxColumns?: number
   page?: number
   pageSize?: number
 }) {
@@ -417,6 +428,7 @@ export async function getMetricRowsPage(input: {
   const range = metricRange(input.days)
   const payload = await readMetricRowsPage(config.output, root, {
     filters: input.filters,
+    maxColumns: input.maxColumns,
     page: input.page,
     pageSize: input.pageSize,
     sinceIso: range.sinceIso,
@@ -431,6 +443,47 @@ export async function getMetricRowsPage(input: {
       availableTo: payload.availableTo,
     },
   }
+}
+
+export async function getMetricAgeRows(days: MetricRangeDays) {
+  const config = await readConfig()
+  const range = metricRange(days)
+  const rows = (
+    await readMetricRows(config.output, root, {
+      order: 'desc',
+      sinceIso: range.sinceIso,
+    })
+  ).reverse()
+
+  return {
+    rows,
+    range: {
+      ...range,
+      availableFrom: rows[0]?.timestamp_utc || null,
+      availableTo: rows.at(-1)?.timestamp_utc || null,
+    },
+  }
+}
+
+export async function getMetricProxyRows(days: MetricRangeDays) {
+  const config = await readConfig()
+  const range = metricRange(days)
+  const rows = (
+    await readMetricRows(config.output, root, {
+      limit: 1000,
+      order: 'desc',
+      sinceIso: range.sinceIso,
+    })
+  ).reverse()
+
+  return { rows }
+}
+
+export async function getMetricRoundRows(input: { roundId: number }) {
+  const config = await readConfig()
+  const rows = await readMetricRowsForRound(config.output, input.roundId, root)
+
+  return { rows }
 }
 
 export async function deleteMetricData() {
@@ -499,6 +552,11 @@ async function ensureRunFiles(config: Config) {
   await mkdir(storageDir, { recursive: true })
   await writeFile(pagesPath, `${config.pages.join('\n')}\n`, 'utf8')
   await writeFile(proxiesPath, await readProxyText(), 'utf8')
+  await writeFile(
+    pageCountryOverridesPath,
+    `${JSON.stringify(config.pageCountryOverrides, null, 2)}\n`,
+    'utf8',
+  )
   await mkdir(dirname(resolveMetricsDbPath(config.output, root)), {
     recursive: true,
   })
@@ -817,13 +875,15 @@ function monitorArgs(config: Config, roundId: number, reason: string) {
     '--delay',
     String(config.delay),
     '--proxy-countries',
-    config.proxyCountries,
+    proxyCountriesForRun(config),
     '--max-proxies-per-country',
     String(config.maxProxiesPerCountry),
     '--global-concurrency',
     String(config.globalConcurrency),
     '--user-agent',
     config.userAgent,
+    '--page-country-overrides',
+    pageCountryOverridesPath,
   ]
 
   if (config.noDirect) args.push('--no-direct')
@@ -834,10 +894,7 @@ function monitorArgs(config: Config, roundId: number, reason: string) {
 }
 
 function configuredProxyLocationCount(config: Config) {
-  const countries = config.proxyCountries
-    .split(',')
-    .map((country) => country.trim())
-    .filter(Boolean).length
+  const countries = configuredProxyCountries(config).length
   return countries + (config.noDirect ? 0 : 1)
 }
 
@@ -897,132 +954,38 @@ function isStopRequested() {
   return stopRequested
 }
 
-async function buildMetrics(
+async function buildDashboardMetrics(
   config: Config,
   range = metricRange(defaultMetricRangeDays),
 ) {
-  const rows = (
-    await readMetricRows(config.output, root, {
-      order: 'desc',
-      sinceIso: range.sinceIso,
-    })
-  ).reverse()
-  const rounds = await readMetricRounds(config.output, root, {
-    sinceIso: range.sinceIso,
-  })
-  const timeColumns = metricTimeColumns(rows)
-  const latest = new Map<string, MetricRow>()
-
-  for (const row of rows) {
-    const normalizedRow: MetricRow = {
-      ...row,
-      proxy_country: normalizeCountry(row.proxy_country || 'unknown'),
-    }
-    const key = `${normalizedRow.page}|${normalizedRow.proxy_country}`
-    const existing = latest.get(key)
-    if (
-      !existing ||
-      Date.parse(normalizedRow.timestamp_utc) >=
-        Date.parse(existing.timestamp_utc)
-    ) {
-      latest.set(key, normalizedRow)
-    }
-  }
-
-  const latestRows = [...latest.values()].sort((a, b) =>
-    `${a.page}|${a.proxy_country}`.localeCompare(
-      `${b.page}|${b.proxy_country}`,
-    ),
-  )
-  const configuredCountries = config.proxyCountries
-    .split(',')
-    .map((country) => normalizeCountry(country))
-    .filter(Boolean)
-  const countries = [
-    ...new Set([
-      ...(!config.noDirect ? ['direct'] : []),
-      ...configuredCountries,
-      ...latestRows.map((row) => row.proxy_country || 'unknown'),
-    ]),
-  ].sort((a, b) =>
-    a === 'direct' ? -1 : b === 'direct' ? 1 : a.localeCompare(b),
-  )
-  const pages = [
-    ...new Set(
-      [...config.pages, ...latestRows.map((row) => row.page)].filter(Boolean),
-    ),
-  ]
-  const pageStats = pages.map((page) => {
-    const pageRows = latestRows.filter((row) => row.page === page)
-    const hitCount = pageRows.filter(
-      (row) => row.cf_cache_status === 'HIT',
-    ).length
-    const missLike = pageRows.filter((row) => isMissLike(row)).length
-    const errors = pageRows.filter((row) => row.error).length
-    const maxAge = Math.max(
-      0,
-      ...pageRows.map((row) => Number(row.age_seconds) || 0),
-    )
-    const avgMs = average(
-      pageRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
-    )
-    return {
-      page,
-      hitCount,
-      missLike,
-      errors,
-      maxAge,
-      avgMs,
-      total: pageRows.length,
-    }
-  })
-  const matrix = pages.map((page) => ({
-    page,
-    cells: countries.map((country) => latest.get(`${page}|${country}`) || null),
-  }))
-
-  const lastMetricRow = rows.at(-1)
-  const lastTimestamp = lastMetricRow?.timestamp_utc || null
-  const summary = {
-    avgResponseMs: average(
-      latestRows.map((row) => Number(row.response_ms)).filter(Number.isFinite),
-    ),
-    countryCount: countries.length,
-    lastTimestamp,
-    latestCells: latestRows.length,
-    latestErrors: latestRows.filter((row) => row.error).length,
-    latestHits: latestRows.filter((row) => row.cf_cache_status === 'HIT')
-      .length,
-    latestMissLike: latestRows.filter(isMissLike).length,
-    maxAge: Math.max(
-      0,
-      ...latestRows.map((row) => Number(row.age_seconds) || 0),
-    ),
-    metricVersion: metricVersionKey(
-      lastMetricRow?.id,
-      rows.length,
-      lastTimestamp,
-    ),
-    totalRounds: rounds.length,
-    totalRows: rows.length,
-  }
+  const [runtimeSummary, rounds] = await Promise.all([
+    readMetricRuntimeSummary(config.output, root, { sinceIso: range.sinceIso }),
+    readMetricRounds(config.output, root, { sinceIso: range.sinceIso }),
+  ])
 
   return {
-    rows,
     rounds,
-    latestRows,
-    countries,
-    pages,
-    pageStats,
-    matrix,
-    timeColumns,
-    summary,
+    summary: {
+      avgResponseMs: runtimeSummary.avgResponseMs,
+      countryCount: Math.max(
+        runtimeSummary.countryCount,
+        configuredProxyLocationCount(config),
+      ),
+      lastTimestamp: runtimeSummary.lastTimestamp,
+      latestCells: runtimeSummary.latestCells,
+      latestErrors: runtimeSummary.latestErrors,
+      latestHits: runtimeSummary.latestHits,
+      latestMissLike: runtimeSummary.latestMissLike,
+      maxAge: runtimeSummary.maxAge,
+      metricVersion: runtimeSummary.metricVersion,
+      totalRounds: rounds.length,
+      totalRows: runtimeSummary.totalRows,
+    },
     range: {
       ...range,
-      availableFrom:
-        rows[0]?.timestamp_utc || rounds.at(-1)?.started_at || null,
+      availableFrom: rounds.at(-1)?.started_at || null,
       availableTo:
-        rows.at(-1)?.timestamp_utc ||
+        runtimeSummary.lastTimestamp ||
         rounds[0]?.completed_at ||
         rounds[0]?.started_at ||
         null,
@@ -1104,32 +1067,6 @@ function metricRange(days: MetricRangeDays) {
   } satisfies MetricDateRange & { days: MetricRangeDays }
 }
 
-function metricTimeColumns(rows: MetricRow[]) {
-  const columns = new Map<
-    string,
-    MetricTimeColumn & { start: number; end: number }
-  >()
-  for (const row of rows) {
-    const column = metricBatchColumn(row)
-    const time = Date.parse(row.timestamp_utc || '')
-    const point = Number.isNaN(time) ? column.sort : time
-    const existing = columns.get(column.key)
-
-    if (!existing) {
-      columns.set(column.key, { ...column, start: point, end: point })
-      continue
-    }
-
-    existing.start = Math.min(existing.start, point)
-    existing.end = Math.max(existing.end, point)
-    existing.sort = existing.start
-    existing.meta = batchTimeRange(existing.start, existing.end)
-  }
-  return [...columns.values()]
-    .sort((a, b) => a.sort - b.sort)
-    .map(({ start: _start, end: _end, ...column }) => column)
-}
-
 function metricTimeColumn(value: string): MetricTimeColumn {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
@@ -1172,19 +1109,6 @@ function batchTimeRange(start: number, end: number) {
   return `${appTimeLabel(middleDate)}, ${appDateLabel(middleDate)}`
 }
 
-function isMissLike(row: MetricRow) {
-  const status = (row.cf_cache_status || '').toUpperCase()
-  return [
-    'MISS',
-    'BYPASS',
-    'DYNAMIC',
-    'EXPIRED',
-    'REVALIDATED',
-    'STALE',
-    'UPDATING',
-  ].includes(status)
-}
-
 function normalizeCountry(country: string) {
   const value = country.trim()
   const names: Record<string, string> = {
@@ -1196,6 +1120,7 @@ function normalizeCountry(country: string) {
     INDIA: 'IN',
     JAPAN: 'JP',
     SINGAPORE: 'SG',
+    UK: 'GB',
     'UNITED KINGDOM': 'GB',
     'UNITED STATES': 'US',
   }
@@ -1204,19 +1129,49 @@ function normalizeCountry(country: string) {
   return names[upper] || upper
 }
 
-function average(values: number[]) {
-  if (!values.length) return 0
-  return Math.round(
-    values.reduce((sum, value) => sum + value, 0) / values.length,
-  )
+function sanitizePageCountryOverrides(
+  input: unknown,
+  pages: string[],
+  legacyBaseUrl: string,
+) {
+  const pageSet = new Set(pages)
+  const overrides: Record<string, string> = {}
+  const value =
+    input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
+
+  for (const [page, country] of Object.entries(value)) {
+    const normalizedPage = normalizeTargetUrl(page, legacyBaseUrl)
+    const normalizedCountry = normalizeCountryOverride(String(country || ''))
+    if (pageSet.has(normalizedPage) && normalizedCountry) {
+      overrides[normalizedPage] = normalizedCountry
+    }
+  }
+
+  return overrides
 }
 
-function metricVersionKey(
-  lastMetricId: string | number | undefined,
-  totalRows: number,
-  lastTimestamp: string | null,
-) {
-  return [lastMetricId || 0, totalRows, lastTimestamp || ''].join(':')
+function normalizeCountryOverride(country: string) {
+  const normalized = normalizeCountry(country)
+  if (normalized === 'direct' || normalized.toLowerCase() === 'local') return ''
+  return /^[A-Z]{2}$/.test(normalized) ? normalized : ''
+}
+
+function configuredProxyCountries(config: Config) {
+  return [
+    ...new Set(
+      [
+        ...config.proxyCountries
+          .split(/[\n,]+/)
+          .map((country) => normalizeCountry(country))
+          .filter((country) => /^[A-Z]{2}$/.test(country)),
+        ...Object.values(config.pageCountryOverrides),
+      ].filter(Boolean),
+    ),
+  ]
+}
+
+function proxyCountriesForRun(config: Config) {
+  return configuredProxyCountries(config).join(',')
 }
 
 function errorMessage(error: unknown) {
