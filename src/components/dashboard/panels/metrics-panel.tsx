@@ -5,7 +5,7 @@ import {
   Search,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import type { CSSProperties } from 'react'
 import {
   flexRender,
@@ -63,9 +63,8 @@ const skeletonTableStyle = {
 } as CSSProperties
 
 export function MetricsPanel(props: MetricsPanelProps) {
-  const [mounted, setMounted] = useState(false)
-  const matrixRows = mounted ? props.rows : []
-  const columns = mounted ? props.columns : []
+  const matrixRows = props.rows
+  const columns = props.columns
   const groups = useMemo(
     () => metricTimeGroups(matrixRows, columns),
     [columns, matrixRows],
@@ -103,10 +102,6 @@ export function MetricsPanel(props: MetricsPanelProps) {
     '--matrix-time-width': `${matrixTimeColWidth}px`,
     '--matrix-url-width': `${matrixUrlColWidth}px`,
   } as CSSProperties
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
   useEffect(() => {
     if (props.pageIndex !== safePage) props.setPageIndex(safePage)
   }, [props.pageIndex, props.setPageIndex, safePage])
@@ -214,7 +209,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
 
       {props.error ? <div className="notice error">{props.error}</div> : null}
 
-      {mounted && pageGroups.length ? (
+      {pageGroups.length ? (
         <div className="matrix-toolbar">
           <div className="matrix-chip-row" aria-label="Metrics matrix summary">
             <span>{props.totalGroups} rows</span>
@@ -229,7 +224,7 @@ export function MetricsPanel(props: MetricsPanelProps) {
         </div>
       ) : null}
 
-      {mounted && (!props.loading || pageGroups.length) ? (
+      {!props.loading || pageGroups.length ? (
         <>
           {pageGroups.length ? (
             <div style={tableStyle}>

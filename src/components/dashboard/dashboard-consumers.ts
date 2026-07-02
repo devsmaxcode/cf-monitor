@@ -55,19 +55,22 @@ export function useMetricsConsumer(initialMetricsPage?: MetricsPagePayload) {
     pageSize === 50
   const initialMetricsFresh = Boolean(
     initialMetricsPage &&
-      initialMetricsPage.totalRows === metrics.summary.totalRows &&
-      initialMetricsPage.range.availableTo === metrics.summary.lastTimestamp,
+    initialMetricsPage.range.days === rangeDays &&
+    initialMetricsPage.totalRows === metrics.summary.totalRows &&
+    initialMetricsPage.range.availableTo === metrics.summary.lastTimestamp,
   )
+  const pagedMetricsFresh = pagedMetrics?.range.days === rangeDays
   const metricsPage =
-    defaultMetricsView && initialMetricsFresh ? initialMetricsPage : pagedMetrics
+    defaultMetricsView && initialMetricsFresh
+      ? initialMetricsPage
+      : pagedMetricsFresh
+        ? pagedMetrics
+        : null
   const countries = useMemo(
     () => metricsPage?.countries ?? [],
     [metricsPage?.countries],
   )
-  const pages = useMemo(
-    () => metricsPage?.pages ?? [],
-    [metricsPage?.pages],
-  )
+  const pages = useMemo(() => metricsPage?.pages ?? [], [metricsPage?.pages])
   const statuses = useMemo(
     () => metricsPage?.statuses ?? [],
     [metricsPage?.statuses],

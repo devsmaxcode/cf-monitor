@@ -110,8 +110,30 @@ export function DashboardProvider({
   )
 
   useEffect(() => {
+    if (initial.metrics.range.days !== rangeDays) return
     applyDashboardPayload(initial)
-  }, [applyDashboardPayload, initial])
+  }, [applyDashboardPayload, initial, rangeDays])
+
+  useEffect(() => {
+    if (metrics.range.days === rangeDays) return
+
+    let active = true
+    setError('')
+
+    void getDashboardFn({ data: { days: rangeDays } })
+      .then((payload) => {
+        if (active && payload.metrics.range.days === rangeDays) {
+          applyDashboardPayload(payload)
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) showError(err)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [applyDashboardPayload, metrics.range.days, rangeDays, showError])
 
   useEffect(() => {
     const timer = window.setInterval(

@@ -8,7 +8,7 @@ import {
   Trash2,
   User,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { countryName, duration, normalizeList, unique } from '../helpers'
 import { Check } from '../ui'
 import type { ConfigDraft, ConfigPanelProps } from '../types'
@@ -42,11 +42,7 @@ const countryCodesByName: Record<string, string> = {
 
 export function ConfigPanel(props: ConfigPanelProps) {
   const [targetMode, setTargetMode] = useState<'json' | 'preview'>('preview')
-  const [targetJson, setTargetJson] = useState(() =>
-    targetJsonFromDraft(props.draft),
-  )
-  const [targetJsonDirty, setTargetJsonDirty] = useState(false)
-  const [targetJsonError, setTargetJsonError] = useState('')
+  const targetJson = targetJsonFromDraft(props.draft)
   const update = <TKey extends keyof ConfigDraft>(
     key: TKey,
     value: ConfigDraft[TKey],
@@ -94,35 +90,8 @@ export function ConfigPanel(props: ConfigPanelProps) {
     : normalizeList(props.draft.proxyCountries).join('\n')
   const countryOptions = buildCountryOptions(props.draft)
 
-  useEffect(() => {
-    if (targetJsonDirty) return
-    setTargetJson(targetJsonFromDraft(props.draft))
-  }, [props.draft, targetJsonDirty])
-
-  const syncTargetJson = () => {
-    setTargetJson(targetJsonFromDraft(props.draft))
-    setTargetJsonDirty(false)
-    setTargetJsonError('')
-  }
   const showTargetJson = () => {
-    syncTargetJson()
     setTargetMode('json')
-  }
-  const updateTargetJson = (value: string) => {
-    setTargetJson(value)
-    setTargetJsonDirty(true)
-    setTargetJsonError('')
-  }
-  const applyTargetJson = () => {
-    try {
-      const parsed = parseTargetJson(targetJson)
-      props.onChange({ ...props.draft, ...parsed })
-      setTargetJson(targetJsonFromTargets(parsed))
-      setTargetJsonDirty(false)
-      setTargetJsonError('')
-    } catch (error) {
-      setTargetJsonError(error instanceof Error ? error.message : String(error))
-    }
   }
 
   return (
@@ -203,18 +172,7 @@ export function ConfigPanel(props: ConfigPanelProps) {
                         <Plus size={16} />
                         <span>Add URL</span>
                       </button>
-                    ) : (
-                      <>
-                        <button
-                          className="button icon-text"
-                          onClick={applyTargetJson}
-                          type="button"
-                        >
-                          <Plus size={16} />
-                          <span>Apply JSON</span>
-                        </button>
-                      </>
-                    )}
+                    ) : null}
                   </div>
                 </div>
                 {targetMode === 'preview' ? (
@@ -267,13 +225,10 @@ export function ConfigPanel(props: ConfigPanelProps) {
                   <>
                     <textarea
                       className="config-textarea-json"
+                      readOnly
                       spellCheck={false}
                       value={targetJson}
-                      onChange={(event) => updateTargetJson(event.target.value)}
                     />
-                    {targetJsonError ? (
-                      <span className="config-error">{targetJsonError}</span>
-                    ) : null}
                   </>
                 )}
               </div>
@@ -530,71 +485,4 @@ function targetJsonFromTargets(targets: {
     null,
     2,
   )}\n`
-}
-
-function parseTargetJson(value: string) {
-  const parsed = JSON.parse(value) as unknown
-  const entries = Array.isArray(parsed)
-    ? parsed
-    : objectArray(parsed, 'urls') || objectArray(parsed, 'pages')
-  if (!entries) throw new Error('Expected a JSON array or object with urls.')
-
-  const pages: string[] = []
-  const pageCountryOverrides: Record<string, string> = {}
-
-  for (const entry of entries) {
-    const target = targetEntry(entry)
-    if (!target.url) continue
-    pages.push(target.url)
-    if (target.country) pageCountryOverrides[target.url] = target.country
-  }
-
-  const overrides =
-    objectRecord(parsed, 'pageCountryOverrides') ||
-    objectRecord(parsed, 'overrides')
-  for (const [page, country] of Object.entries(overrides || {})) {
-    const code = countryCode(String(country || ''))
-    if (pages.includes(page) && code) pageCountryOverrides[page] = code
-  }
-
-  return { pages: uniqueList(pages), pageCountryOverrides }
-}
-
-function targetEntry(entry: unknown) {
-  if (typeof entry === 'string') return { country: '', url: entry.trim() }
-  if (!entry || typeof entry !== 'object') return { country: '', url: '' }
-
-  const row = entry as Record<string, unknown>
-  const url = String(row.url || row.page || '').trim()
-  const country = countryCode(
-    String(row.country || row.proxyCountry || row.countryCode || ''),
-  )
-  return { country, url }
-}
-
-function objectArray(value: unknown, key: 'pages' | 'urls') {
-  if (!value || typeof value !== 'object') return null
-  const item = (value as Record<string, unknown>)[key]
-  return Array.isArray(item) ? item : null
-}
-
-function objectRecord(
-  value: unknown,
-  key: 'overrides' | 'pageCountryOverrides',
-) {
-  if (!value || typeof value !== 'object') return null
-  const item = (value as Record<string, unknown>)[key]
-  return item && typeof item === 'object' && !Array.isArray(item)
-    ? (item as Record<string, unknown>)
-    : null
-}
-
-function uniqueList(values: string[]) {
-  const seen = new Set<string>()
-  return values.filter((value) => {
-    const key = value.toLowerCase()
-    if (!value || seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
 }

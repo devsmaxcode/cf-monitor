@@ -1,5 +1,6 @@
 import {
   createFileRoute,
+  retainSearchParams,
   stripSearchParams,
   useNavigate,
 } from '@tanstack/react-router'
@@ -25,7 +26,10 @@ function validateDashboardSearch(search: Record<string, unknown>) {
 export const Route = createFileRoute('/_dashboard')({
   validateSearch: validateDashboardSearch,
   search: {
-    middlewares: [stripSearchParams(dashboardSearchDefaults)],
+    middlewares: [
+      retainSearchParams(['days']),
+      stripSearchParams(dashboardSearchDefaults),
+    ],
   },
   loaderDeps: ({ search }) => ({ days: search.days }),
   loader: ({ deps }) => getDashboardFn({ data: { days: deps.days } }),
